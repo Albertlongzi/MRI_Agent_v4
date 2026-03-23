@@ -1,0 +1,280 @@
+{
+  "case_id": "prostate_fix_verify_001",
+  "run_id": "graph-prostate-20260321000559-54c930c6",
+  "created_at": "2026-03-21T00:05:59.931095+00:00",
+  "metadata": {
+    "domain": "prostate",
+    "input_root": "/common/longz2/medgemma/MRI_Agent/demo/cases/sub-057"
+  },
+  "stage_outputs": {
+    "identify": {
+      "identify_sequences": [
+        {
+          "call_id": "identify_sequences-001",
+          "ok": true,
+          "consumable": true,
+          "attempt_id": "identify_sequences-attempt-001",
+          "rerun_from": null,
+          "supersedes": null,
+          "data": {
+            "mapping": {
+              "ADC": "/common/longz2/medgemma/MRI_Agent/demo/cases/sub-057/AX_DIFFUSION_ADC",
+              "DWI": "/common/longz2/medgemma/MRI_Agent/demo/cases/sub-057/AX_DIFFUSION_TRACEW",
+              "T2w": "/common/longz2/medgemma/MRI_Agent/demo/cases/sub-057/AX_T2"
+            },
+            "confidence": {
+              "ADC": 0.9,
+              "DWI": 0.7,
+              "T2w": 0.9
+            },
+            "series_inventory_path": "/common/longz2/medgemma/MRI_Agent_v4/artifacts/graph-prostate-20260321000559-54c930c6/02_identify-sequences/series_inventory.json",
+            "dicom_meta_path": "/common/longz2/medgemma/MRI_Agent_v4/artifacts/graph-prostate-20260321000559-54c930c6/02_identify-sequences/dicom_meta.json",
+            "dicom_headers_index_path": "/common/longz2/medgemma/MRI_Agent_v4/artifacts/graph-prostate-20260321000559-54c930c6/02_identify-sequences/dicom_headers_index.txt",
+            "series": [
+              {
+                "series_name": "AX_DIFFUSION_ADC",
+                "series_dir": "/common/longz2/medgemma/MRI_Agent/demo/cases/sub-057/AX_DIFFUSION_ADC",
+                "n_dicoms": 32,
+                "nifti_path": null,
+                "sequence_guess": "ADC",
+                "sequence_confidence": 0.9,
+                "SeriesInstanceUID": null,
+                "SeriesDescription": null,
+                "Modality": null,
+                "b_values": null,
+                "counts_by_b": null,
+                "dicom_header_txt": "/common/longz2/medgemma/MRI_Agent_v4/artifacts/graph-prostate-20260321000559-54c930c6/02_identify-sequences/dicom_txt/AX_DIFFUSION_ADC_header.txt",
+                "nifti_spacing": null,
+                "nifti_spacing_source": null,
+                "nifti_spacing_mismatch": null
+              },
+              {
+                "series_name": "AX_DIFFUSION_TRACEW",
+                "series_dir": "/common/longz2/medgemma/MRI_Agent/demo/cases/sub-057/AX_DIFFUSION_TRACEW",
+                "n_dicoms": 64,
+                "nifti_path": null,
+                "sequence_guess": "DWI",
+                "sequence_confidence": 0.7,
+                "SeriesInstanceUID": null,
+                "SeriesDescription": null,
+                "Modality": null,
+                "b_values": null,
+                "counts_by_b": null,
+                "dicom_header_txt": "/common/longz2/medgemma/MRI_Agent_v4/artifacts/graph-prostate-20260321000559-54c930c6/02_identify-sequences/dicom_txt/AX_DIFFUSION_TRACEW_header.txt",
+                "nifti_spacing": null,
+                "nifti_spacing_source": null,
+                "nifti_spacing_mismatch": null
+              },
+              {
+                "series_name": "AX_T2",
+                "series_dir": "/common/longz2/medgemma/MRI_Agent/demo/cases/sub-057/AX_T2",
+                "n_dicoms": 32,
+                "nifti_path": null,
+                "sequence_guess": "T2w",
+                "sequence_confidence": 0.9,
+                "SeriesInstanceUID": null,
+                "SeriesDescription": null,
+                "Modality": null,
+                "b_values": null,
+                "counts_by_b": null,
+                "dicom_header_txt": "/common/longz2/medgemma/MRI_Agent_v4/artifacts/graph-prostate-20260321000559-54c930c6/02_identify-sequences/dicom_txt/AX_T2_header.txt",
+                "nifti_spacing": null,
+                "nifti_spacing_source": null,
+                "nifti_spacing_mismatch": null
+              }
+            ],
+            "nifti_by_series": {},
+            "note": "Stage-1 identify+ingest: headers parsed; NIfTI conversion disabled.",
+            "runtime_profile": "control-plane",
+            "launcher": "inproc",
+            "runtime_provenance": {
+              "runtime_profile": "control-plane",
+              "launcher": "inproc",
+              "host": "esplhpccompbio-lv01",
+              "ssh_host": null,
+              "remote_workdir": null,
+              "gpu": false,
+              "python_env": null,
+              "python_bin": null,
+              "conda_env": null,
+              "conda_executable": null,
+              "container_image": null,
+              "bind_mounts": [],
+              "env": {},
+              "env_passthrough": [],
+              "launcher_bin": null,
+              "ssh_bin": null,
+              "ssh_options": [
+                "-o",
+                "BatchMode=yes"
+              ],
+              "inherit_pythonpath": true,
+              "timeout_seconds": null,
+              "containerized": false,
+              "remote_execution": false,
+              "invocation": []
+            }
+          },
+          "validation": {
+            "tool_name": "identify_sequences",
+            "required_output_paths": [
+              "series_inventory_path",
+              "dicom_meta_path",
+              "dicom_headers_index_path"
+            ],
+            "resolved_output_paths": {
+              "series_inventory_path": "/common/longz2/medgemma/MRI_Agent_v4/artifacts/graph-prostate-20260321000559-54c930c6/02_identify-sequences/series_inventory.json",
+              "dicom_meta_path": "/common/longz2/medgemma/MRI_Agent_v4/artifacts/graph-prostate-20260321000559-54c930c6/02_identify-sequences/dicom_meta.json",
+              "dicom_headers_index_path": "/common/longz2/medgemma/MRI_Agent_v4/artifacts/graph-prostate-20260321000559-54c930c6/02_identify-sequences/dicom_headers_index.txt"
+            },
+            "missing_output_paths": [],
+            "consumable": true
+          },
+          "stage_order": 1
+        }
+      ]
+    },
+    "register": {
+      "register_to_reference": [
+        {
+          "call_id": "register_to_reference-001",
+          "ok": true,
+          "consumable": true,
+          "attempt_id": "register_adc-attempt-001",
+          "rerun_from": null,
+          "supersedes": null,
+          "data": {
+            "fixed": "/common/longz2/medgemma/MRI_Agent/demo/cases/sub-057/AX_T2",
+            "moving": "/common/longz2/medgemma/MRI_Agent/demo/cases/sub-057/AX_DIFFUSION_ADC",
+            "output_subdir": "03_register-adc",
+            "transform_path": "/common/longz2/medgemma/MRI_Agent_v4/artifacts/graph-prostate-20260321000559-54c930c6/03_register-adc/transform_identity.tfm",
+            "resampled_path": "/common/longz2/medgemma/MRI_Agent_v4/artifacts/graph-prostate-20260321000559-54c930c6/03_register-adc/moving_adc_resampled_to_fixed.nii.gz",
+            "resampled_paths": {
+              "adc": "/common/longz2/medgemma/MRI_Agent_v4/artifacts/graph-prostate-20260321000559-54c930c6/03_register-adc/moving_adc_resampled_to_fixed.nii.gz"
+            },
+            "qc_pngs": {
+              "fixed_T2w_central": "/common/longz2/medgemma/MRI_Agent_v4/artifacts/graph-prostate-20260321000559-54c930c6/03_register-adc/fixed_T2w_central.png",
+              "moving_adc_central": "/common/longz2/medgemma/MRI_Agent_v4/artifacts/graph-prostate-20260321000559-54c930c6/03_register-adc/moving_adc_central.png"
+            },
+            "qc_metrics": {
+              "method": "identity"
+            },
+            "note": "Stage-2 resample using SimpleITK (method=identity).",
+            "runtime_profile": "control-plane",
+            "launcher": "inproc",
+            "runtime_provenance": {
+              "runtime_profile": "control-plane",
+              "launcher": "inproc",
+              "host": "esplhpccompbio-lv01",
+              "ssh_host": null,
+              "remote_workdir": null,
+              "gpu": false,
+              "python_env": null,
+              "python_bin": null,
+              "conda_env": null,
+              "conda_executable": null,
+              "container_image": null,
+              "bind_mounts": [],
+              "env": {},
+              "env_passthrough": [],
+              "launcher_bin": null,
+              "ssh_bin": null,
+              "ssh_options": [
+                "-o",
+                "BatchMode=yes"
+              ],
+              "inherit_pythonpath": true,
+              "timeout_seconds": null,
+              "containerized": false,
+              "remote_execution": false,
+              "invocation": []
+            }
+          },
+          "validation": {
+            "tool_name": "register_to_reference",
+            "required_output_paths": [
+              "resampled_path",
+              "transform_path"
+            ],
+            "resolved_output_paths": {
+              "resampled_path": "/common/longz2/medgemma/MRI_Agent_v4/artifacts/graph-prostate-20260321000559-54c930c6/03_register-adc/moving_adc_resampled_to_fixed.nii.gz",
+              "transform_path": "/common/longz2/medgemma/MRI_Agent_v4/artifacts/graph-prostate-20260321000559-54c930c6/03_register-adc/transform_identity.tfm"
+            },
+            "missing_output_paths": [],
+            "consumable": true
+          },
+          "stage_order": 2
+        }
+      ]
+    },
+    "segment": {
+      "segment_prostate": [
+        {
+          "call_id": "segment_prostate-001",
+          "ok": false,
+          "consumable": false,
+          "attempt_id": "segment_prostate-attempt-001",
+          "rerun_from": null,
+          "supersedes": null,
+          "data": {
+            "error": "apptainer launcher did not produce result file | profile=apptainer-medgemma | launcher=apptainer | host=esplhpc-cp082 | details=output_path=/common/longz2/medgemma/MRI_Agent_v4/runtime/graph-prostate-20260321000559-54c930c6/.runtime_dispatch/segment_prostate.result.json"
+          },
+          "validation": {
+            "error": "apptainer launcher did not produce result file | profile=apptainer-medgemma | launcher=apptainer | host=esplhpc-cp082 | details=output_path=/common/longz2/medgemma/MRI_Agent_v4/runtime/graph-prostate-20260321000559-54c930c6/.runtime_dispatch/segment_prostate.result.json"
+          },
+          "stage_order": 3
+        }
+      ]
+    }
+  },
+  "stage_meta": {
+    "identify": 1,
+    "register": 2,
+    "segment": 3
+  },
+  "artifacts_index": [
+    {
+      "path": "/common/longz2/medgemma/MRI_Agent_v4/artifacts/graph-prostate-20260321000559-54c930c6/02_identify-sequences/series_inventory.json",
+      "kind": "json",
+      "description": "Series inventory",
+      "media_type": null
+    },
+    {
+      "path": "/common/longz2/medgemma/MRI_Agent_v4/artifacts/graph-prostate-20260321000559-54c930c6/02_identify-sequences/dicom_meta.json",
+      "kind": "json",
+      "description": "Curated DICOM metadata (headers only)",
+      "media_type": null
+    },
+    {
+      "path": "/common/longz2/medgemma/MRI_Agent_v4/artifacts/graph-prostate-20260321000559-54c930c6/02_identify-sequences/dicom_headers_index.txt",
+      "kind": "text",
+      "description": "Index of per-series DICOM header text files",
+      "media_type": null
+    },
+    {
+      "path": "/common/longz2/medgemma/MRI_Agent_v4/artifacts/graph-prostate-20260321000559-54c930c6/03_register-adc/transform_identity.tfm",
+      "kind": "transform",
+      "description": "Identity transform (header-based resample)",
+      "media_type": null
+    },
+    {
+      "path": "/common/longz2/medgemma/MRI_Agent_v4/artifacts/graph-prostate-20260321000559-54c930c6/03_register-adc/fixed_T2w_central.png",
+      "kind": "figure",
+      "description": "Fixed (T2w) central slice PNG",
+      "media_type": null
+    },
+    {
+      "path": "/common/longz2/medgemma/MRI_Agent_v4/artifacts/graph-prostate-20260321000559-54c930c6/03_register-adc/moving_adc_resampled_to_fixed.nii.gz",
+      "kind": "nifti",
+      "description": "Resampled moving volume (adc) in fixed space",
+      "media_type": null
+    },
+    {
+      "path": "/common/longz2/medgemma/MRI_Agent_v4/artifacts/graph-prostate-20260321000559-54c930c6/03_register-adc/moving_adc_central.png",
+      "kind": "figure",
+      "description": "Resampled moving (adc) central slice PNG",
+      "media_type": null
+    }
+  ],
+  "summary": {}
+}

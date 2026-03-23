@@ -1,0 +1,95 @@
+{
+  "version": 1,
+  "profiles": {
+    "control-plane": {
+      "description": "Default in-process runtime for lightweight orchestration and CPU-safe tools.",
+      "launcher": "inproc",
+      "python_env": ".venv",
+      "gpu": false,
+      "notes": [
+        "Use for API, planner, schema work, metadata tools, and deterministic report packaging.",
+        "This should stay small and stable."
+      ]
+    },
+    "legacy-qwen-vllm": {
+      "description": "Shared conda environment on compute nodes for legacy v3 MRI tools and GPU-capable Python packages.",
+      "launcher": "subprocess",
+      "conda_env": "qwen_vllm",
+      "conda_executable": "/apps/anaconda3/2022.05/bin/conda",
+      "timeout_seconds": 90,
+      "gpu": true,
+      "notes": [
+        "Best near-term bridge for tools already proven in v3.",
+        "Prefer this before building per-tool containers."
+      ]
+    },
+    "cp082-qwen-vllm": {
+      "description": "Run GPU-required legacy v3 tools on esplhpc-cp082 over SSH against the shared /common workspace.",
+      "launcher": "ssh",
+      "conda_env": "qwen_vllm",
+      "conda_executable": "/apps/anaconda3/2022.05/bin/conda",
+      "ssh_host": "esplhpc-cp082",
+      "ssh_options": ["-o", "BatchMode=yes", "-o", "ConnectTimeout=30"],
+      "remote_workdir": "/common/longz2/medgemma/MRI_Agent_v4",
+      "timeout_seconds": 600,
+      "gpu": true,
+      "notes": [
+        "Use when the current control node has no visible GPU.",
+        "Assumes payload/output paths live on the shared filesystem."
+      ]
+    },
+    "apptainer-medgemma": {
+      "description": "Run heavyweight MRI tools on esplhpc-cp082 inside Apptainer while reusing the validated qwen_vllm conda env from the shared filesystem.",
+      "launcher": "apptainer",
+      "ssh_host": "esplhpc-cp082",
+      "ssh_options": ["-o", "BatchMode=yes", "-o", "ConnectTimeout=30"],
+      "remote_workdir": "/common/longz2/medgemma/MRI_Agent_v4",
+      "launcher_bin": "/cm/local/apps/apptainer/1.0.1/bin/apptainer",
+      "container_image": "docker://python:3.9-slim",
+      "container_workdir": "/common/longz2/medgemma/MRI_Agent_v4",
+      "bind_mounts": ["/common:/common", "/apps:/apps", "/home:/home"],
+      "python_bin": "/home/longz2/.conda/envs/qwen_vllm/bin/python",
+      "conda_env": "qwen_vllm",
+      "conda_executable": "/apps/anaconda3/2022.05/bin/conda",
+      "env_passthrough": ["CUDA_VISIBLE_DEVICES"],
+      "inherit_pythonpath": false,
+      "timeout_seconds": 1200,
+      "gpu": true,
+      "notes": [
+        "Container path for cp082 when reproducibility and launcher provenance matter more than the bare shared-env path.",
+        "Current implementation pins the base Python image but still reuses the host qwen_vllm conda env inside the container.",
+        "PYTHONPATH is intentionally cleaned so the container does not inherit the control-plane virtualenv site-packages."
+      ]
+    },
+    "nnunet-gpu": {
+      "description": "GPU-heavy segmentation/classification runtime with nnUNet-style dependencies.",
+      "launcher": "subprocess",
+      "conda_executable": "/apps/anaconda3/2022.05/bin/conda",
+      "timeout_seconds": 90,
+      "gpu": true,
+      "notes": [
+        "Use for segmentation/classification tools with conflicting torch or nnUNet requirements.",
+        "Can later be migrated behind Apptainer if the conda stack becomes brittle."
+      ]
+    }
+  },
+  "tool_profiles": {
+    "identify_sequences": "control-plane",
+    "package_vlm_evidence": "control-plane",
+    "generate_report": "control-plane",
+    "register_to_reference": "control-plane",
+    "materialize_registration": "control-plane",
+    "alignment_qc": "control-plane",
+    "extract_roi_features": "legacy-qwen-vllm",
+    "segment_prostate": "apptainer-medgemma",
+    "detect_lesion_candidates": "legacy-qwen-vllm",
+    "correct_prostate_distortion": "legacy-qwen-vllm",
+    "brats_mri_segmentation": "nnunet-gpu",
+    "classify_brain_glioma_grade": "legacy-qwen-vllm",
+    "segment_cardiac_cine": "nnunet-gpu",
+    "classify_cardiac_cine_disease": "legacy-qwen-vllm",
+    "reconstruct_grappa": "legacy-qwen-vllm",
+    "rag_search": "control-plane",
+    "sandbox_exec": "control-plane"
+  }
+}

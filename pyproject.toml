@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mri-agent-v4"
+version = "0.1.0"
+description = "Natural-language radiology workstation scaffold for MRI_Agent v4"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "pydantic>=2,<3",
+  "fastapi>=0.110,<1",
+  "uvicorn>=0.27,<1",
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["apps*", "packages*"]

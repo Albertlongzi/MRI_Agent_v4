@@ -1,0 +1,38 @@
+{
+  "tool_name": "segment_prostate",
+  "data": {
+    "prostate_mask_path": "/common/longz2/medgemma/MRI_Agent_v4/artifacts/graph-prostate-20260320213215-950d44be/04_segment-prostate/prostate_whole_gland_mask.nii.gz",
+    "zone_mask_path": "/common/longz2/medgemma/MRI_Agent_v4/artifacts/graph-prostate-20260320213215-950d44be/04_segment-prostate/t2w_input_zones.nii.gz",
+    "t2w_input_path": "/common/longz2/medgemma/MRI_Agent_v4/artifacts/graph-prostate-20260320213215-950d44be/04_segment-prostate/t2w_input.nii.gz",
+    "note": "Segmentation successful. Preprocessing and Invertd corrected. spacing_policy=auto. device=cuda."
+  },
+  "warnings": [],
+  "source_artifacts": [],
+  "generated_artifacts": [
+    {
+      "path": "/common/longz2/medgemma/MRI_Agent_v4/artifacts/graph-prostate-20260320213215-950d44be/04_segment-prostate/t2w_input_zones.nii.gz",
+      "kind": "nifti",
+      "description": "Prostate Zones (1=CG, 2=PZ)",
+      "media_type": null
+    },
+    {
+      "path": "/common/longz2/medgemma/MRI_Agent_v4/artifacts/graph-prostate-20260320213215-950d44be/04_segment-prostate/prostate_whole_gland_mask.nii.gz",
+      "kind": "nifti",
+      "description": "Whole Gland Binary Mask",
+      "media_type": null
+    },
+    {
+      "path": "/common/longz2/medgemma/MRI_Agent_v4/artifacts/graph-prostate-20260320213215-950d44be/04_segment-prostate/t2w_input.nii.gz",
+      "kind": "nifti",
+      "description": "T2w input NIfTI written for segmentation",
+      "media_type": null
+    }
+  ],
+  "runtime_profile": "cp082-qwen-vllm",
+  "launcher": "ssh",
+  "invocation": [
+    "/home/longz2/.conda/envs/qwen_vllm/bin/python",
+    "-m",
+    "packages.tools.runtime_worker"
+  ]
+}

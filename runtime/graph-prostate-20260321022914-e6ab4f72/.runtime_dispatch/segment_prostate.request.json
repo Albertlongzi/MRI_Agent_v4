@@ -1,0 +1,14 @@
+{
+  "tool_name": "segment_prostate",
+  "args": {
+    "t2w_ref": "/common/longz2/medgemma/MRI_Agent/demo/cases/sub-057/AX_T2",
+    "output_subdir": "04_segment-prostate"
+  },
+  "case_id": "prostate_fix_verify_001",
+  "run_id": "graph-prostate-20260321022914-e6ab4f72",
+  "run_dir": "/common/longz2/medgemma/MRI_Agent_v4/runtime/graph-prostate-20260321022914-e6ab4f72",
+  "artifacts_dir": "/common/longz2/medgemma/MRI_Agent_v4/artifacts/graph-prostate-20260321022914-e6ab4f72",
+  "case_state_path": "/common/longz2/medgemma/MRI_Agent_v4/runtime/graph-prostate-20260321022914-e6ab4f72/case_state.json",
+  "runtime_profile": "apptainer-medgemma",
+  "launcher": "apptainer"
+}

@@ -1,0 +1,14 @@
+{
+  "tool_name": "segment_prostate",
+  "args": {
+    "t2w_ref": "/common/longz2/medgemma/MRI_Agent_v4/artifacts/graph-prostate-demo/03_segment-prostate/t2w_input.nii.gz",
+    "output_subdir": "04_segment-prostate"
+  },
+  "case_id": "runtime-direct-repro",
+  "run_id": "graph-apptainer-direct-repro",
+  "run_dir": "/common/longz2/medgemma/MRI_Agent_v4/runtime/graph-apptainer-direct-repro",
+  "artifacts_dir": "/common/longz2/medgemma/MRI_Agent_v4/runtime/graph-apptainer-direct-repro/artifacts",
+  "case_state_path": "/common/longz2/medgemma/MRI_Agent_v4/runtime/graph-apptainer-direct-repro/case_state.json",
+  "runtime_profile": "apptainer-medgemma",
+  "launcher": "apptainer"
+}
