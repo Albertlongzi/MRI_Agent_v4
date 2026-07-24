@@ -56,10 +56,32 @@ class OpenAICompatibleClient:
                 "latency_ms": int((time.time() - started) * 1000),
             }
 
+    @staticmethod
+    def _merge_adjacent_roles(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
+        """Collapse consecutive same-role turns into one.
+
+        Several chat templates -- Gemma's among them -- require roles to
+        alternate and reject a run of two `system` turns with
+        "Conversation roles must alternate...". The planner naturally builds
+        [system(persona), system(context), user], so against those models every
+        call returned HTTP 400 and the planner silently fell back to its
+        heuristic path with llm_status="error". Merging here keeps the callers
+        free to append context turns without knowing the served model's rules.
+        """
+        merged: List[Dict[str, str]] = []
+        for item in messages:
+            role = str(item.get("role") or "")
+            content = str(item.get("content") or "")
+            if merged and merged[-1]["role"] == role:
+                merged[-1]["content"] = f"{merged[-1]['content']}\n\n{content}".strip()
+            else:
+                merged.append({"role": role, "content": content})
+        return merged
+
     def chat(self, messages: List[Dict[str, str]], *, temperature: float = 0.2, max_tokens: int = 384) -> Dict[str, Any]:
         payload = {
             "model": self.model,
-            "messages": messages,
+            "messages": self._merge_adjacent_roles(messages),
             "temperature": float(temperature),
             "max_tokens": int(max_tokens),
         }

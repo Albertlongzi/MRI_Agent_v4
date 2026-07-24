@@ -99,7 +99,12 @@ const state = {
   nodeLayouts: {},
   inspectorTab: "node",
   lastAction: "Loaded local fallback demo state.",
-  reflectorState: { active: true, node_id: "register_adc", phase: "reflecting", attempt: 2, reasoning: "Detected voxel grid mismatch. Adding pre-resampling step and retrying." },
+  // Must start inactive. This used to ship as a hard-coded "active" banner
+  // describing a voxel-grid mismatch on a `register_adc` node, so every fresh
+  // session opened by reporting an error that had not happened -- on a cardiac
+  // case, about a node that does not even exist in the graph. Nothing refreshes
+  // this from the backend, so the placeholder was never cleared.
+  reflectorState: { active: false, node_id: null, phase: null, attempt: 0, reasoning: "" },
   reflectorDismissed: false,
 };
 
