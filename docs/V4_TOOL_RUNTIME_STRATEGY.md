@@ -28,13 +28,13 @@ This keeps the orchestration layer stable while allowing new tools to land witho
    - GPU: yes when needed
 
 3. `cp082-qwen-vllm`
-   - purpose: explicit SSH dispatch to `esplhpc-cp082` when the control node has no visible GPU
+   - purpose: explicit SSH dispatch to `<gpu-node>` when the control node has no visible GPU
    - launcher: `ssh`
    - environment: shared `qwen_vllm` conda env on the remote host
    - GPU: yes
 
 4. `apptainer-medgemma`
-   - purpose: remote `ssh + apptainer exec` path on `esplhpc-cp082`
+   - purpose: remote `ssh + apptainer exec` path on `<gpu-node>`
    - launcher: `apptainer`
    - environment: pinned base container plus bind-mounted shared repo and host conda env
    - GPU: yes
@@ -45,7 +45,7 @@ This keeps the orchestration layer stable while allowing new tools to land witho
    - environment: dedicated GPU-capable env
    - GPU: yes
 
-These profiles are declared in [configs/tool_runtime_profiles.json](/home/longz2/common/medgemma/MRI_Agent_v4/configs/tool_runtime_profiles.json).
+These profiles are declared in [configs/tool_runtime_profiles.json](../configs/tool_runtime_profiles.json).
 
 ## Why Not One Big Env
 
@@ -76,8 +76,8 @@ On HPC, prefer `Apptainer` over Docker for isolated GPU runtimes.
 
 This aligns with the existing `v3` direction:
 
-- [start_vllm_server_apptainer.sh](/home/longz2/common/medgemma/MRI_Agent/scripts/start_vllm_server_apptainer.sh)
-- [start_medgemma_server_apptainer.sh](/home/longz2/common/medgemma/MRI_Agent/scripts/start_medgemma_server_apptainer.sh)
+- [start_vllm_server_apptainer.sh](https://github.com/Albertlongzi/BCER/blob/main/scripts/start_vllm_server_apptainer.sh)
+- [start_medgemma_server_apptainer.sh](https://github.com/Albertlongzi/BCER/blob/main/scripts/start_medgemma_server_apptainer.sh)
 
 For `v4`, the recommended near-term pattern is:
 
@@ -107,7 +107,7 @@ This keeps runtime policy deterministic and auditable.
 
 As of 2026-03-20, the runtime layer now supports:
 
-- real `ssh` dispatch to `esplhpc-cp082`
+- real `ssh` dispatch to `<gpu-node>`
 - real `apptainer` dispatch, including `ssh + apptainer exec`
 - runtime provenance attached to tool results via `runtime_provenance`
 - explicit launcher failure semantics for missing profile, missing container image, and invalid bind sources

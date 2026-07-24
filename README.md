@@ -5,6 +5,16 @@
 `MRI_Agent_v4` is the next product line for a natural-language radiology MRI
 workstation.
 
+It is the **UI / control-plane companion** to the open BCER engine repo
+([`Albertlongzi/BCER`](https://github.com/Albertlongzi/BCER)). This repo owns the
+chat interface, the action-graph planner, the web workstation UI, and the
+execution control plane; BCER owns the actual MRI tool implementations. Nothing
+here re-implements a tool — `packages/tools` bridges into the BCER tool registry
+at the path given by `BCER_ROOT` (see below). Without a BCER checkout the tool
+bridge reports `status: "down"` and no tool node can execute.
+
+Throughout the docs, `v3` refers to that BCER engine.
+
 It is intended to preserve the strongest architectural ideas from `v3`:
 
 - Brain / Cerebellum separation
@@ -42,7 +52,7 @@ MRI_Agent_v4/
   apps/
     web/
     api/
-    worker/
+    worker/      # planned only — not implemented, no code in this repo
   packages/
     schemas/
     planner/
@@ -78,11 +88,9 @@ Implemented today:
   - deterministic runtime/store with patch application, execute-next, reset,
     and real artifact writing under `artifacts/`
 - `packages/tools`
-  - read-only bridge into the `v3` registry for tool metadata, domain catalog,
-    capability summary, and bridge health, plus direct execution bridges for
-    `identify_sequences`, `package_vlm_evidence`, and deterministic
-    `generate_report`, plus runtime-profile config loading and a first
-    dispatcher for `inproc` and `subprocess` launches
+  - read-only bridge into the `v3` (BCER) registry for tool metadata, domain
+    catalog, capability summary, and bridge health, plus runtime-profile config
+    loading and a first dispatcher for `inproc` and `subprocess` launches
 - `apps/api`
   - backend endpoints for session, graph, events, chat, patch preview,
     proposal application, execution, reset, tool discovery, planner health,
@@ -95,10 +103,41 @@ Implemented today:
 - `run_demo.py`
   - local entrypoint for the demo server
 
+## Executor Coverage (read this before judging the demo)
+
+The planner and compiler can emit graphs for **11** tools, but the executor has
+real handlers for only **5** of them — all on the prostate path:
+
+| Tool | Executor handler |
+| --- | --- |
+| `identify_sequences` | yes — real BCER call |
+| `register_to_reference` | yes — real BCER call |
+| `segment_prostate` | yes — real BCER call |
+| `package_vlm_evidence` | yes — real BCER call |
+| `generate_report` | yes — real BCER call, `llm_mode=disabled` |
+| `detect_lesion_candidates` | **no** |
+| `extract_roi_features` | **no** |
+| `brats_mri_segmentation` | **no** |
+| `classify_brain_glioma_grade` | **no** |
+| `segment_cardiac_cine` | **no** |
+| `classify_cardiac_cine_disease` | **no** |
+
+Consequences, stated plainly:
+
+- **Brain and cardiac graphs do not run.** The planner will happily compile them,
+  and then the executor raises `MissingExecutorHandlerError` on the first tool
+  node. That is deliberate: there is no mock mode and no placeholder result, so a
+  tool that cannot really run fails instead of reporting fabricated success.
+- The prostate workflow is the only end-to-end path, and even it requires a
+  working `BCER_ROOT` plus the demo case data from the BCER repo.
+- `generate_report` runs with `llm_mode=disabled`, i.e. deterministic templating,
+  not model-written prose.
+
 ## Run The Demo
 
 ```bash
-cd /home/longz2/common/medgemma/MRI_Agent_v4
+git clone https://github.com/Albertlongzi/MRI_Agent_v4.git
+cd MRI_Agent_v4
 python -m venv .venv
 .venv/bin/pip install -r requirements.txt
 .venv/bin/python run_demo.py
@@ -176,10 +215,12 @@ The scaffold now supports:
 - previewing a patch that inserts a human review checkpoint
 - applying the latest proposal into the canonical ActionGraph
 - executing the next runnable node deterministically
-- running a real `v3 identify_sequences` pass as the first executor step
-- running a real `v3 package_vlm_evidence` pass after segmentation
-- running a real `v3 generate_report` pass with `llm_mode=disabled`
-- writing real JSON / TXT / SVG artifacts for the demo workflow
+- running the five implemented prostate tools as real `v3` (BCER) calls —
+  `identify_sequences`, `register_to_reference`, `segment_prostate`,
+  `package_vlm_evidence`, and `generate_report` (`llm_mode=disabled`)
+- failing loudly on the six tools that have no executor handler, rather than
+  returning a placeholder success (see *Executor Coverage* above)
+- writing real JSON / TXT / SVG artifacts for the prostate demo workflow
 - exposing the `v3` tool catalog, domains, and capabilities through a safe
   read-only bridge
 - exposing runtime-profile metadata so tools can be mapped to `control-plane`,

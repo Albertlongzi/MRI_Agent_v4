@@ -1,65 +1,65 @@
 # V4 State / API Lifecycle
 
-审计日期：2026-03-20
+Audit date: 2026-03-20
 
-本文冻结 `MRI_Agent_v4` 当前最小 durable state、session registration、event stream 与 reset/recovery 语义。
+This document freezes the current minimal durable state, session registration, event stream, and reset/recovery semantics of `MRI_Agent_v4`.
 
 ## 1. Canonical State Shape
 
-当前 canonical state 由 `packages/state/store.py` 管理，底层使用 SQLite。
+Canonical state is managed by `packages/state/store.py`, backed by SQLite.
 
-默认数据库路径：
+Default database path:
 
 - `MRI_Agent_v4/state/v4_state.sqlite3`
 
-可通过环境变量覆盖：
+Override via environment variable:
 
 - `MRI_AGENT_V4_STATE_DB=/path/to/custom.sqlite3`
 
-当前最小 durable 数据模型：
+The current minimal durable data model:
 
 - `sessions`
   - active session metadata
-  - 当前 graph id / version / status
+  - current graph id / version / status
   - clean reset template (`template_session_json`)
   - chat history
 - `case_states`
-  - 当前 `CaseState` snapshot
+  - current `CaseState` snapshot
 - `graph_snapshots`
-  - 当前 `ActionGraph` snapshot
+  - current `ActionGraph` snapshot
 - `events`
   - append-only event log
-  - 按 `(session_id, graph_id, event_id)` 去重
+  - deduplicated by `(session_id, graph_id, event_id)`
 - `patches`
-  - proposal / applied patch 持久化
+  - persisted proposal / applied patches
 
-其中：
+Within that model:
 
-- `graph_snapshots.graph_json` 是当前 graph 的 authoritative snapshot。
-- `events` 是 append-only 历史。
-- `template_session_json` 是 reset 的 clean source，不跟随执行态污染。
+- `graph_snapshots.graph_json` is the authoritative snapshot of the current graph.
+- `events` is append-only history.
+- `template_session_json` is the clean source for reset; it is never polluted by execution state.
 
 ## 2. Session Lifecycle
 
 ### 2.1 Boot
 
-API 启动时：
+When the API starts:
 
-1. 打开 SQLite schema。
-2. 读取 `sessions.is_active=1` 的记录。
-3. 如果存在：
-   - 恢复 `case_state`
-   - 恢复 `graph_snapshot`
-   - 恢复 `chat_history`
-4. 如果不存在：
-   - bootstrap 默认 demo session
-   - 立即写入 SQLite
+1. Open the SQLite schema.
+2. Read the record with `sessions.is_active=1`.
+3. If one exists:
+   - restore `case_state`
+   - restore `graph_snapshot`
+   - restore `chat_history`
+4. If none exists:
+   - bootstrap the default demo session
+   - write it to SQLite immediately
 
 ### 2.2 Registration
 
-新 session 通过 `POST /api/session` 或 `POST /api/cases/register` 创建。
+New sessions are created via `POST /api/session` or `POST /api/cases/register`.
 
-请求体：
+Request body:
 
 ```json
 {
@@ -70,36 +70,36 @@ API 启动时：
 }
 ```
 
-语义：
+Semantics:
 
-- `case_id` 必填
-- `input_root` 必填
-- `domain` 可选，默认 `prostate`
-- `session_id` 可选，不传则自动生成
+- `case_id` is required
+- `input_root` is required
+- `domain` is optional and defaults to `prostate`
+- `session_id` is optional and is generated automatically if omitted
 
-注册后：
+After registration:
 
-- 新 session 被标记为 active
-- 写入初始 graph snapshot
-- 追加初始 events：
+- the new session is marked active
+- the initial graph snapshot is written
+- the initial events are appended:
   - `case_registered`
   - `graph_initialized`
 
 ### 2.3 Reset
 
-`POST /api/reset` 现在的语义是：
+`POST /api/reset` now means:
 
-1. 删除当前 graph 对应的 runtime/artifact workspace。
-2. 使用 clean template 重新生成一个新的 graph id。
-3. 保留 session 的 case/domain/input 信息。
-4. 把新 graph 设为 active graph。
-5. 新 run 的 runtime workspace 从空状态重新生成。
+1. Delete the runtime/artifact workspace belonging to the current graph.
+2. Regenerate a new graph id from the clean template.
+3. Preserve the session's case/domain/input information.
+4. Set the new graph as the active graph.
+5. Regenerate the runtime workspace for the new run from an empty state.
 
-这保证：
+This guarantees that:
 
-- 旧 `stage_outputs` 不会污染新 run
-- reset 后 graph/workspace 都是新的
-- 连续 rerun 时 `call_id` 会从新 graph 的 clean state 重新开始
+- old `stage_outputs` cannot pollute the new run
+- both the graph and the workspace are new after a reset
+- on repeated reruns, `call_id` restarts from the clean state of the new graph
 
 ## 3. Eventing
 
@@ -108,49 +108,49 @@ API 启动时：
 - `GET /api/events`
 - `GET /api/events?after_event_id=event-0002`
 
-返回当前 active graph 的事件列表，不会混入旧 graph 的历史事件。
+Returns the event list for the currently active graph; history from older graphs is never mixed in.
 
 ### 3.2 SSE
 
 - `GET /api/events/stream`
 - `GET /api/events/stream?after_event_id=event-0002`
 
-返回 `text/event-stream`。
+Returns `text/event-stream`.
 
-当前行为：
+Current behavior:
 
-- 连接建立后先发一个 `stream_ready`
-- 然后回放 backlog（如果有）
-- 再持续轮询 SQLite 中当前 active graph 的新事件
-- 空闲时发送 keep-alive 注释行
+- once the connection is established, a `stream_ready` is sent first
+- then the backlog is replayed, if any
+- then SQLite is polled continuously for new events on the currently active graph
+- keep-alive comment lines are sent while idle
 
-前端可直接消费：
+The frontend can consume these directly:
 
 - `event: stream_ready`
 - `event: case_registered`
 - `event: node_started`
 - `event: node_finished`
 - `event: patch_previewed`
-- 其他 graph events
+- other graph events
 
 ## 4. Chat / Planner Wiring
 
-`POST /api/chat` 当前最小接入规则：
+The current minimal wiring rules for `POST /api/chat`:
 
-- `planner.mode="graph"`：
-  - 将 planner 返回的 `graph` 写入当前 active graph
-  - 追加 `graph_replaced` event
-- `planner.mode="patch"`：
-  - 优先使用 planner 返回的 typed `patch`
-  - 作为 proposal 持久化到 graph + SQLite
-- 仅当 planner 没给 typed patch 时：
-  - 才回退到旧的 heuristic `preview_patch(reason=...)`
+- `planner.mode="graph"`:
+  - write the `graph` returned by the planner into the currently active graph
+  - append a `graph_replaced` event
+- `planner.mode="patch"`:
+  - prefer the typed `patch` returned by the planner
+  - persist it as a proposal into the graph and into SQLite
+- only when the planner does not supply a typed patch:
+  - fall back to the older heuristic `preview_patch(reason=...)`
 
-这保证 API 不再只把 planner proposal 留在 response 里。
+This guarantees that the API no longer leaves planner proposals sitting in the response only.
 
 ## 5. Stable API Surface
 
-保留兼容：
+Kept for compatibility:
 
 - `GET /api/session`
 - `GET /api/graph`
@@ -163,7 +163,7 @@ API 启动时：
 - `POST /api/execute/rerun-from-node`
 - `POST /api/reset`
 
-新增：
+Newly added:
 
 - `POST /api/session`
 - `POST /api/cases/register`
@@ -171,21 +171,21 @@ API 启动时：
 
 ## 6. Verified Behaviors
 
-已验证：
+Verified:
 
-- API 重启后 active session 能从 SQLite 恢复。
-- `POST /api/session` 可创建非 demo case 的 session。
-- SSE 可返回 `stream_ready` 与 backlog events。
-- prostate demo 可完成一轮真实执行，其中 `segment_prostate` 通过 runtime profile SSH 到 `esplhpc-cp082`。
-- `reset -> rerun` 后 graph id 变化，旧 runtime workspace 被删除，新 run 的 `segment_prostate-001` 不混入旧记录。
+- After an API restart, the active session can be restored from SQLite.
+- `POST /api/session` can create a session for a non-demo case.
+- SSE returns `stream_ready` plus backlog events.
+- The prostate demo can complete one round of real execution, in which `segment_prostate` reaches `<gpu-node>` over SSH via its runtime profile.
+- After `reset -> rerun`, the graph id changes, the old runtime workspace is deleted, and the new run's `segment_prostate-001` is not contaminated by old records.
 
 ## 7. Minimal Validation Commands
 
 ### 7.1 Local API
 
 ```bash
-cd /home/longz2/common/medgemma/MRI_Agent_v4
-PYTHONPATH=/home/longz2/common/medgemma/MRI_Agent_v4/.venv/lib/python3.9/site-packages:$PYTHONPATH python run_demo.py
+cd /path/to/MRI_Agent_v4
+PYTHONPATH=/path/to/MRI_Agent_v4/.venv/lib/python3.9/site-packages:$PYTHONPATH python run_demo.py
 ```
 
 ```bash
@@ -204,18 +204,18 @@ curl -N http://127.0.0.1:8008/api/events/stream
 
 ### 7.2 Recovery
 
-1. 注册一个 session。
-2. 停掉 API。
-3. 重启 API。
-4. 再次请求 `GET /api/session`。
-5. 应看到同一个 active session / graph 被恢复。
+1. Register a session.
+2. Stop the API.
+3. Restart the API.
+4. Request `GET /api/session` again.
+5. You should see the same active session / graph restored.
 
 ### 7.3 GPU Path
 
-`segment_prostate` 当前 runtime profile：
+The current runtime profile for `segment_prostate`:
 
 - `profile_id=cp082-qwen-vllm`
 - `launcher=ssh`
-- `ssh_host=esplhpc-cp082`
+- `ssh_host=<gpu-node>`
 
-因此控制面可以在无 GPU 提交节点上发起执行，但 GPU step 会转发到 `esplhpc-cp082`。
+The control plane can therefore initiate execution from a submit node with no GPU, while the GPU step is forwarded to `<gpu-node>`.

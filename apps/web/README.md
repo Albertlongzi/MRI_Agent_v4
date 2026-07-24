@@ -1,24 +1,25 @@
-# MRI AI STUDIO
+# Web UI
 
-`apps/web/` 现在是已接入的正式静态前端，根文件已由 `mri_ai_studio` 的可部署版本替换。
+`apps/web/` is the static frontend for `MRI_Agent_v4`. It is framework-free —
+plain HTML + CSS + JS, no build step.
 
-前端源码快照仍保留在：
+```text
+apps/web/
+├── index.html    # workstation shell
+├── styles.css
+├── app.js
+└── serve.sh      # standalone static preview
+```
 
-- [mri_ai_studio/README.md](/home/longz2/common/medgemma/MRI_Agent_v4/apps/web/mri_ai_studio/README.md)
-- [mri_ai_studio/apps/web/index.html](/home/longz2/common/medgemma/MRI_Agent_v4/apps/web/mri_ai_studio/apps/web/index.html)
-- [mri_ai_studio/apps/web/styles.css](/home/longz2/common/medgemma/MRI_Agent_v4/apps/web/mri_ai_studio/apps/web/styles.css)
-- [mri_ai_studio/apps/web/app.js](/home/longz2/common/medgemma/MRI_Agent_v4/apps/web/mri_ai_studio/apps/web/app.js)
+## How it is served
 
-当前部署方式：
+- The FastAPI backend (`apps/api/main.py`) mounts this whole directory at
+  `/static`.
+- `GET /` returns `apps/web/index.html`.
+- The page loads `/static/styles.css` and `/static/app.js`.
 
-- FastAPI 继续挂载 `apps/web` 到 `/static`
-- `/` 返回 [index.html](/home/longz2/common/medgemma/MRI_Agent_v4/apps/web/index.html)
-- 页面资源从 `/static/styles.css` 和 `/static/app.js` 加载
+## Backend routes the UI calls
 
-当前 UI 已接入这些后端路径：
-
-- `/api/health`
-- `/api/planner/health`
 - `/api/session`
 - `/api/graph`
 - `/api/events`
@@ -32,22 +33,30 @@
 - `/api/domains`
 - `/api/capabilities`
 - `/api/tools/bridge/health`
+- `/api/planner/health`
 - `/artifacts/...`
 
-本地静态预览：
+The backend exposes more routes than this (see the top-level `README.md`); the
+list above is only what the current UI actually fetches.
+
+## Static preview (no backend)
+
+Layout-only check — every API call will fail:
 
 ```bash
-cd /home/longz2/common/medgemma/MRI_Agent_v4/apps/web
-./serve.sh
+cd apps/web
+./serve.sh          # http://127.0.0.1:8001
 ```
 
-同源联调：
+## Same-origin run (with backend)
+
+From the repository root:
 
 ```bash
-cd /home/longz2/common/medgemma/MRI_Agent_v4
-PYTHONPATH=/home/longz2/common/medgemma/MRI_Agent_v4 ./.venv/bin/python run_demo.py
+.venv/bin/python run_demo.py
 ```
 
-然后打开：
+Then open `http://127.0.0.1:8008/`.
 
-- `http://127.0.0.1:8008/`
+Note that `index.html` pulls webfonts from `fonts.googleapis.com`, so the page
+falls back to system fonts on an offline or air-gapped host.

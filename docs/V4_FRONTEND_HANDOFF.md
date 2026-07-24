@@ -1,67 +1,67 @@
 # V4 Frontend Handoff
 
-这份文档是给前端单独拆分开发用的。目标不是继续沿用当前静态页面，而是把 `MRI_Agent_v4` 的后端接口、数据模型、现有前端代码入口一次交接清楚，方便你在本地重写 UI。
+This document describes the frontend's contract with the backend, so that the frontend can be developed independently. The goal is not to keep building on the current static page, but to hand over the `MRI_Agent_v4` backend API surface, its data models, and the entry points of the existing frontend code in one place, so the UI can be rewritten from scratch.
 
-## 1. 当前前端代码
+## 1. Current frontend code
 
-当前前端还是一个无框架静态版本，代码都在：
+The current frontend is still a framework-free static version. All of its code lives in:
 
-- [index.html](/home/longz2/common/medgemma/MRI_Agent_v4/apps/web/index.html)
-- [styles.css](/home/longz2/common/medgemma/MRI_Agent_v4/apps/web/styles.css)
-- [app.js](/home/longz2/common/medgemma/MRI_Agent_v4/apps/web/app.js)
+- [index.html](../apps/web/index.html)
+- [styles.css](../apps/web/styles.css)
+- [app.js](../apps/web/app.js)
 
-辅助说明：
+Supporting notes:
 
-- [apps/web/README.md](/home/longz2/common/medgemma/MRI_Agent_v4/apps/web/README.md)
+- [apps/web/README.md](../apps/web/README.md)
 
-如果你要本地重写前端，最推荐的做法是：
+The recommended approach for a from-scratch rewrite is:
 
-- 保留 `apps/api` 作为后端
-- 你在本地单开一个新的前端项目，比如 `frontend/` 或单独 repo
-- 只把这里的 API contract 当成数据源
+- keep `apps/api` as the backend
+- start a separate frontend project, for example under `frontend/` or in its own repo
+- treat the API contract described here as the only data source
 
-## 2. 当前后端入口
+## 2. Current backend entry point
 
-后端入口在：
+The backend entry point is:
 
-- [main.py](/home/longz2/common/medgemma/MRI_Agent_v4/apps/api/main.py)
+- [main.py](../apps/api/main.py)
 
-后端当前已经允许跨域：
+The backend already allows cross-origin requests:
 
 - `allow_origins=["*"]`
 - `allow_methods=["*"]`
 - `allow_headers=["*"]`
 
-所以你本地独立前端可以直接请求 HPC 上的 API，只要网络/tunnel 通。
+A standalone local frontend can therefore call the API on the HPC directly, as long as the network path or tunnel is open.
 
-## 3. 推荐的本地前端适配方式
+## 3. Recommended ways to connect a local frontend
 
-推荐两种模式：
+Two patterns are recommended:
 
-### 3.1 本地 dev server + SSH tunnel
+### 3.1 Local dev server + SSH tunnel
 
-如果后端在 HPC 节点上跑：
+When the backend runs on an HPC node:
 
-- 本地浏览器访问你自己的前端 dev server，例如 `http://127.0.0.1:3000`
-- 前端请求通过 tunnel 指向 HPC 后端，例如 `http://127.0.0.1:18008`
+- the local browser hits the frontend's own dev server, for example `http://127.0.0.1:3000`
+- frontend requests are pointed through the tunnel at the HPC backend, for example `http://127.0.0.1:18008`
 
-前端建议配置一个环境变量：
+The frontend should be configured with an environment variable:
 
 ```bash
 VITE_API_BASE_URL=http://127.0.0.1:18008
 ```
 
-或者：
+or:
 
 ```bash
 NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:18008
 ```
 
-### 3.2 本地 dev server 代理 `/api`
+### 3.2 Local dev server proxying `/api`
 
-如果你用 Vite/Next.js，也可以直接把 `/api` 代理到后端。
+With Vite or Next.js, `/api` can instead be proxied straight to the backend.
 
-这样前端代码里只要请求：
+Frontend code then only needs to request:
 
 ```text
 /api/session
@@ -69,19 +69,19 @@ NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:18008
 /api/chat
 ```
 
-## 4. 稳定 API 面
+## 4. Stable API surface
 
-下面这些接口可以视为当前前端应直接依赖的稳定面。
+The endpoints below can be treated as the stable surface a frontend should depend on directly.
 
 ### Health / Planner
 
 - `GET /api/health`
 - `GET /api/planner/health`
 
-用途：
+Used for:
 
-- 顶部状态条
-- 显示 Brain 是否接到本地 `vLLM`
+- the top status bar
+- showing whether the Brain is connected to the local `vLLM`
 
 ### Session / Graph / Events
 
@@ -89,10 +89,10 @@ NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:18008
 - `GET /api/graph`
 - `GET /api/events`
 
-用途：
+Used for:
 
-- 初始化页面主状态
-- 刷新 graph、chat、artifact、event timeline
+- initializing the page's main state
+- refreshing the graph, chat, artifacts, and event timeline
 
 ### Chat / Patch / Execute
 
@@ -103,12 +103,12 @@ NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:18008
 - `POST /api/execute/until-done`
 - `POST /api/reset`
 
-用途：
+Used for:
 
-- 聊天
-- 人类插入 review checkpoint
-- 应用 proposal
-- 单步执行/全流程执行
+- chat
+- inserting a human review checkpoint
+- applying a proposal
+- single-step execution / full-pipeline execution
 - reset session
 
 ### Tool / Runtime Metadata
@@ -120,28 +120,28 @@ NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:18008
 - `GET /api/runtime/profiles`
 - `GET /api/runtime/tools/{tool_name}`
 
-用途：
+Used for:
 
-- 工具目录
-- domain / capability 面板
-- runtime profile 可视化
+- the tool catalog
+- the domain / capability panel
+- runtime profile visualization
 
 ### Artifact Serving
 
 - `GET /artifacts/...`
 
-用途：
+Used for:
 
-- 直接渲染 `json/txt/svg`
-- 以后也可扩展到 image / nifti viewer
+- rendering `json/txt/svg` directly
+- later extending to an image / NIfTI viewer
 
-## 5. 最重要的数据模型
+## 5. Key data models
 
-模型定义在：
+The models are defined in:
 
-- [models.py](/home/longz2/common/medgemma/MRI_Agent_v4/packages/schemas/models.py)
+- [models.py](../packages/schemas/models.py)
 
-前端最需要关心的是这几个：
+The ones the frontend most needs to care about are:
 
 - `MockSession`
 - `CaseState`
@@ -152,9 +152,9 @@ NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:18008
 - `GraphEvent`
 - `ExecutionPatch`
 
-## 6. 推荐的前端 TypeScript 接口
+## 6. Suggested frontend TypeScript interfaces
 
-你本地重写前端时，可以先按下面这套来建类型。
+A local rewrite can start by declaring the types below.
 
 ```ts
 export type GraphStatus = "draft" | "ready" | "running" | "paused" | "completed" | "failed";
@@ -266,23 +266,23 @@ export interface MockSession {
 }
 ```
 
-## 7. 接口返回格式
+## 7. Endpoint response formats
 
 ### 7.1 `GET /api/session`
 
-返回 `MockSession`。
+Returns a `MockSession`.
 
 ### 7.2 `GET /api/graph`
 
-返回 `ActionGraph`。
+Returns an `ActionGraph`.
 
 ### 7.3 `GET /api/events`
 
-返回 `GraphEvent[]`。
+Returns a `GraphEvent[]`.
 
 ### 7.4 `POST /api/chat`
 
-请求体：
+Request body:
 
 ```json
 {
@@ -290,7 +290,7 @@ export interface MockSession {
 }
 ```
 
-响应重点字段：
+Key response fields:
 
 ```json
 {
@@ -311,15 +311,15 @@ export interface MockSession {
 }
 ```
 
-前端适配建议：
+Notes for the frontend:
 
-- 优先用 `response.session` 和 `response.graph` 覆盖本地状态
-- `response.reply` 只作为兜底显示
-- `response.patch` 存在时，说明 Brain 或 heuristic 提出了新 proposal
+- prefer overwriting local state with `response.session` and `response.graph`
+- treat `response.reply` as a display-only fallback
+- when `response.patch` is present, the Brain or a heuristic has raised a new proposal
 
 ### 7.5 `POST /api/patch`
 
-请求体：
+Request body:
 
 ```json
 {
@@ -327,7 +327,7 @@ export interface MockSession {
 }
 ```
 
-响应：
+Response:
 
 ```json
 {
@@ -338,10 +338,10 @@ export interface MockSession {
 
 ### 7.6 `POST /api/proposals/apply-latest`
 
-响应：
+Response:
 
-- 成功时带 `graph` 和 `session`
-- 没有 proposal 时：
+- on success, carries `graph` and `session`
+- when there is no proposal:
 
 ```json
 {
@@ -353,7 +353,7 @@ export interface MockSession {
 
 ### 7.7 `POST /api/execute/next`
 
-响应重点：
+Key response fields:
 
 ```json
 {
@@ -369,7 +369,7 @@ export interface MockSession {
 
 ### 7.8 `POST /api/reset`
 
-响应：
+Response:
 
 ```json
 {
@@ -378,21 +378,21 @@ export interface MockSession {
 }
 ```
 
-## 8. Artifact URI 规则
+## 8. Artifact URI rules
 
-`ArtifactRef.uri` 目前通常长这样：
+`ArtifactRef.uri` currently usually looks like this:
 
 ```text
 artifacts/graph-prostate-demo/05_generate-report/report.json
 ```
 
-前端应统一转成：
+The frontend should uniformly convert it to:
 
 ```text
 ${API_BASE_URL}/artifacts/graph-prostate-demo/05_generate-report/report.json
 ```
 
-建议封装：
+A suggested helper:
 
 ```ts
 export function artifactUrl(apiBaseUrl: string, uri: string): string {
@@ -402,9 +402,9 @@ export function artifactUrl(apiBaseUrl: string, uri: string): string {
 }
 ```
 
-## 9. 前端最小页面状态建议
+## 9. Suggested minimal frontend page state
 
-如果你本地重写，我建议最小 state 只保留：
+For a rewrite, the recommended minimal state is just:
 
 - `session`
 - `graph`
@@ -416,48 +416,48 @@ export function artifactUrl(apiBaseUrl: string, uri: string): string {
 - `toolCatalog`
 - `runtimeProfiles`
 
-拖拽画布布局建议完全前端本地管理，例如：
+Drag-and-drop canvas layout is best managed entirely on the frontend, for example:
 
 - `nodeLayouts: Record<string, { x: number; y: number }>`
-- 后期再决定要不要持久化回后端
+- whether to persist it back to the backend can be decided later
 
-## 10. 目前后端对前端的假设
+## 10. What the backend currently assumes about the frontend
 
-目前后端并不要求你使用现有静态页面。
+The backend does not require the existing static page to be used.
 
-它只假设前端会：
+It only assumes the frontend will:
 
-- 拉取 `session / graph / events`
-- 发送 `chat`
-- 发送 `patch`
-- 发送 `execute`
-- 打开 `/artifacts/...`
+- fetch `session / graph / events`
+- send `chat`
+- send `patch`
+- send `execute`
+- open `/artifacts/...`
 
-所以你可以完全重写 UI，不需要兼容现有 DOM 结构。
+The UI can therefore be rewritten completely, with no need to stay compatible with the existing DOM structure.
 
-## 11. 你本地重写时我建议保留的交互块
+## 11. Interaction blocks worth keeping in a rewrite
 
-推荐保留这四块，但实现方式你可以全部重做：
+These four blocks are worth keeping, but their implementation can be redone entirely:
 
 - `chat panel`
 - `graph canvas`
 - `artifact viewer`
 - `inspector`
 
-## 12. 不稳定项
+## 12. Unstable items
 
-下面这些目前还不算冻结：
+The following are not yet frozen:
 
-- Brain 输出是否升级成 structured graph patch
-- node layout 是否后端持久化
-- runtime profile 是否进一步细化为 job launcher schema
-- graph 节点是否补充更多 domain-specific UI metadata
+- whether the Brain's output is upgraded to a structured graph patch
+- whether node layout is persisted by the backend
+- whether runtime profiles are refined further into a job launcher schema
+- whether graph nodes gain more domain-specific UI metadata
 
-所以前端最好把这些做成可选字段，不要写死。
+The frontend should therefore model these as optional fields rather than hard-coding them.
 
-## 13. 最推荐的下一步
+## 13. Recommended next step
 
-你本地前端可以先只接这 6 个接口：
+A local frontend can start against just these six endpoints:
 
 - `GET /api/health`
 - `GET /api/planner/health`
@@ -466,11 +466,11 @@ export function artifactUrl(apiBaseUrl: string, uri: string): string {
 - `POST /api/execute/next`
 - `GET /artifacts/...`
 
-先把：
+Get these four things working first:
 
 - chat
 - square graph canvas
 - node selection
 - artifact preview
 
-这四件事跑通，再逐步补 `patch / apply proposal / runtime profiles`。
+Once those four work, add `patch / apply proposal / runtime profiles` incrementally.

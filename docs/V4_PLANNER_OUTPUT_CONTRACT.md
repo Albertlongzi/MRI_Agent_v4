@@ -1,18 +1,18 @@
 # V4 Planner Output Contract
 
-审计日期：2026-03-20
+Audit date: 2026-03-20
 
-本文定义 `packages/planner` 当前对外返回的主输出 contract。
+This document defines the contract for the primary output that `packages/planner` currently returns to its callers.
 
-目标很明确：
+The goal is explicit:
 
-- planner 主输出不再是纯聊天文本
-- planner 现在优先返回 `graph` 或 `patch`
-- `reply` 仅作为 operator-facing 附属说明
+- the planner's primary output is no longer plain chat text
+- the planner now returns a `graph` or a `patch` in preference to anything else
+- `reply` is only a secondary, operator-facing explanation
 
-## 1. 返回顶层结构
+## 1. Top-level return structure
 
-`BrainService.reply(...)` 返回一个 JSON-serializable dict，字段如下：
+`BrainService.reply(...)` returns a JSON-serializable dict with the following fields:
 
 ```json
 {
@@ -54,28 +54,28 @@
 }
 ```
 
-说明：
+Notes:
 
-- `mode="graph"` 时，`graph` 是主结果，`patch` 为空。
-- `mode="patch"` 时，`patch` 是主结果，`graph` 为空。
-- `mode="reply"` 时，没有结构化 proposal，只有附属文本回复。
-- `reply` 永远是附属输出，不应再被视为 planner 主结果。
+- When `mode="graph"`, `graph` is the primary result and `patch` is empty.
+- When `mode="patch"`, `patch` is the primary result and `graph` is empty.
+- When `mode="reply"`, there is no structured proposal, only the secondary text reply.
+- `reply` is always a secondary output and should no longer be treated as the planner's primary result.
 
-## 2. 当前已实现的两条主路径
+## 2. The two main paths implemented so far
 
 ### 2.1 Semantic IR -> draft graph
 
-当前 planner 的内部顺序是：
+The planner's internal sequence is:
 
-1. 从用户输入提取 `IntentSpec`
-2. 可选地让 LLM 在 semantic planner prompt 约束下补一个 intent draft
-3. 基于 `IntentSpec` 推导 domain / capabilities / constraints / preferences
-4. 交给 compiler 生成 `ActionGraph`
-5. 用 semantic validator 检查 graph 是否漏掉用户明确要求
+1. Extract an `IntentSpec` from the user's input
+2. Optionally have the LLM add an intent draft, constrained by the semantic planner prompt
+3. Derive the domain / capabilities / constraints / preferences from the `IntentSpec`
+4. Hand off to the compiler to produce an `ActionGraph`
+5. Use the semantic validator to check whether the graph dropped anything the user explicitly asked for
 
-这让 graph 不再直接承载语义解析职责，而只是 compiler 输出。
+This means the graph no longer carries semantic parsing responsibility directly; it is purely compiler output.
 
-当前 `IntentSpec` 的最小语义字段是：
+The minimal semantic fields of `IntentSpec` are currently:
 
 - `intent_id`
 - `intent_type`
@@ -90,35 +90,35 @@
 - `patch_anchor`
 - `notes`
 
-提取规则：
+Extraction rules:
 
-- `explicit_requested_capabilities` 只收用户直接点名的能力，如 `register / segment / classify / report`
-- `explicit_requested_capabilities` 现在也支持 `lesion / roi_features`
-- `inferred_requested_capabilities` 只收编译器补全用的能力，如 `full_pipeline`
-- `constraints` 记录硬约束，如 `before_segmentation`、`human_review_required`
-- `preferences` 记录软偏好，如 `short report`
+- `explicit_requested_capabilities` only collects capabilities the user named directly, such as `register / segment / classify / report`
+- `explicit_requested_capabilities` now also supports `lesion / roi_features`
+- `inferred_requested_capabilities` only collects capabilities the compiler adds to fill out the workflow, such as `full_pipeline`
+- `constraints` records hard constraints such as `before_segmentation` and `human_review_required`
+- `preferences` records soft preferences such as `short report`
 
-### 2.2 自然语言 -> draft graph
+### 2.2 Natural language -> draft graph
 
-当前已实现最小路径已经从 prostate-only 推到 domain-aware / capability-aware：
+The minimal path implemented so far has moved on from prostate-only to domain-aware and capability-aware:
 
-- planner 会结合 `user_message`
+- the planner combines `user_message`
 - `case_state.domain`
-- 当前 domain catalog / capability catalog
+- the current domain catalog / capability catalog
 
-共同决定：
+and uses them together to decide:
 
-- graph 属于哪个 domain
-- 应该落哪些 capability
-- 对应选择哪些 tool
+- which domain the graph belongs to
+- which capabilities should be materialized
+- which tools to select accordingly
 
-当前支持的 domain：
+Currently supported domains:
 
 - `prostate`
 - `brain`
 - `cardiac`
 
-当前支持的 materialized capability：
+Currently supported materialized capabilities:
 
 - `full_pipeline`
 - `register`
@@ -126,98 +126,98 @@
 - `classify`
 - `report`
 
-示例：
+Examples:
 
 - prostate workup: `identify_sequences -> register_to_reference -> segment_prostate -> package_vlm_evidence -> generate_report`
 - brain classify/report: `identify_sequences -> brats_mri_segmentation -> extract_roi_features -> classify_brain_glioma_grade -> generate_report`
 - cardiac report: `identify_sequences -> segment_cardiac_cine -> generate_report`
 
-graph 仍保留一个已完成的 `intake_case` planner node 作为 workflow 入口。
+The graph still retains a completed `intake_case` planner node as the workflow entry point.
 
-### 2.3 自然语言 -> typed patch
+### 2.3 Natural language -> typed patch
 
-当前已实现最小路径：
+The minimal path implemented so far:
 
-- 输入 `pause before segmentation`
-- planner 生成合法 `ExecutionPatch`
-- patch 目标落在当前 active graph 上
+- the user enters `pause before segmentation`
+- the planner produces a valid `ExecutionPatch`
+- the patch targets the currently active graph
 
-当前 patch proposal 使用：
+The current patch proposal uses:
 
 - `op="insert_checkpoint"`
 - `target="<segmentation node id>"`
 - `value.after_node="<registration node id>"`
 
-其效果是：
+The effect is to:
 
-- 在 registration 后插入一个人工 review checkpoint
-- 再恢复到 segmentation 节点继续执行
+- insert a human review checkpoint after registration
+- then resume execution at the segmentation node
 
-## 3. 最小自检规则
+## 3. Minimal self-check rules
 
-planner 在返回结构化 proposal 前，会做最小合法性校验。
+Before returning a structured proposal, the planner runs a minimal validity check.
 
-### Graph 校验
+### Graph validation
 
-- `node_id` 必须唯一
-- `depends_on` 不能引用不存在的节点
-- `tool_name` 必须属于当前已知 tool catalog
-- `edge.from_node` / `edge.to_node` 不能引用不存在的节点
+- `node_id` must be unique
+- `depends_on` must not reference a node that does not exist
+- `tool_name` must belong to the currently known tool catalog
+- `edge.from_node` / `edge.to_node` must not reference nodes that do not exist
 
-### Semantic graph 校验
+### Semantic graph validation
 
-- graph 不能漏掉用户显式要求的 capability
-- 显式要求的 `roi_features` 不能被简化成只做 segmentation/report
-- `reply` 文本不能替代 graph 覆盖校验
+- the graph must not drop a capability the user explicitly requested
+- an explicitly requested `roi_features` must not be reduced to segmentation/report alone
+- `reply` text is not a substitute for the graph coverage check
 
-### Patch 校验
+### Patch validation
 
-- `insert_checkpoint.target` 必须是现有 graph node
-- `value.after_node` 必须是现有 graph node
+- `insert_checkpoint.target` must be an existing graph node
+- `value.after_node` must be an existing graph node
 
-校验结果写入：
+Validation results are written to:
 
 - `planner_metadata.validation_passed`
 - `planner_metadata.validation_errors`
 - `warnings`
 
-## 4. 降级语义
+## 4. Degradation semantics
 
-LLM 不再决定 planner 是否能产出主结果。
+The LLM no longer determines whether the planner can produce a primary result.
 
-当前语义是：
+The current semantics are:
 
-- graph / patch proposal 由 deterministic heuristic planner 负责生成
-- LLM 只负责补一段短的 operator-facing `reply`
+- graph / patch proposals are generated by the deterministic heuristic planner
+- the LLM is only responsible for adding a short, operator-facing `reply`
 
-因此即使 LLM down：
+So even if the LLM is down:
 
-- planner 仍可返回 `mode="graph"` 或 `mode="patch"` 的主结果
-- `planner_metadata.llm_status` 会标记为 `disabled` / `error` / `llm_filtered`
-- `warnings` 会带上降级原因
+- the planner can still return a primary result with `mode="graph"` or `mode="patch"`
+- `planner_metadata.llm_status` is marked as `disabled` / `error` / `llm_filtered`
+- `warnings` carries the reason for the degradation
 
-这保证了：
+This guarantees that:
 
-- planner 不会因为 chat layer 挂掉而失去 proposal 能力
-- `reply` 失败不会阻断结构化 graph / patch 产出
+- the planner does not lose its ability to produce proposals just because the chat layer is down
+- a failed `reply` does not block structured graph / patch output
 
-## 5. 当前 intent 路由
+## 5. Current intent routing
 
-已实现的 intent：
+Implemented intents:
 
 - `graph_domain_workup`
 - `patch_review_before_segmentation`
 - `reply`
 
-当前最小 intent 规则：
+The current minimal intent rules:
 
-- 包含 domain + workflow / segment / classify / register / report 语义的请求：走 `mode="graph"`
-- 包含 `pause/review/checkpoint before segmentation`：走 `mode="patch"`
-- 其他请求：走 `mode="reply"`
+- a request carrying domain plus workflow / segment / classify / register / report semantics routes to `mode="graph"`
+- a request containing `pause/review/checkpoint before segmentation` routes to `mode="patch"`
+- any other request routes to `mode="reply"`
 
-## 6. planner_metadata.extras 扩展
+## 6. planner_metadata.extras extensions
 
-当前 `mode="graph"` 时，`planner_metadata.extras` 至少会包含：
+When `mode="graph"`, `planner_metadata.extras` currently contains at least:
 
 - `domain`
 - `proposal_kind`
@@ -226,31 +226,31 @@ LLM 不再决定 planner 是否能产出主结果。
 - `selected_tools`
 - `runtime_hints`
 
-其中 `runtime_hints` 会给出每个已选 tool 当前解析到的 runtime profile，例如：
+`runtime_hints` gives the runtime profile currently resolved for each selected tool, for example:
 
 - `profile_id`
 - `launcher`
 - `gpu`
 - `ssh_host`
 
-这让 planner proposal 在 graph draft 阶段就能体现运行前提，尤其是 GPU tool 可通过 `ssh esplhpc-cp082` 执行。
+This lets a planner proposal surface its execution prerequisites as early as the graph draft stage, in particular that GPU tools can be run via `ssh <gpu-node>`.
 
-## 7. 对 Agent 3 的最小 wiring 需求
+## 7. Minimal wiring required from Agent 3
 
-本轮没有主动改 `apps/api/**`。
+This round of work did not modify `apps/api/**`.
 
-如果 Agent 3 要把 planner proposal 真正接进 API / state，最小 wiring 是：
+For Agent 3 to wire planner proposals into the API and state layer for real, the minimum required is:
 
-1. 当 `/api/chat` 收到 `planner.mode="graph"` 时，把 `planner.graph` 写成一个 staged proposal，而不是只留在 response 里。
-2. 当 `/api/chat` 收到 `planner.mode="patch"` 时，优先使用 `planner.patch`，不要再退回 heuristic `preview_patch(reason=...)`。
-3. 给 graph proposal 增加“accept / replace active graph”的明确入口。
+1. When `/api/chat` receives `planner.mode="graph"`, persist `planner.graph` as a staged proposal instead of leaving it only in the response.
+2. When `/api/chat` receives `planner.mode="patch"`, use `planner.patch` in preference to falling back to the heuristic `preview_patch(reason=...)`.
+3. Add an explicit "accept / replace active graph" entry point for graph proposals.
 
-## 8. 复现方式
+## 8. Reproduction
 
 ### Prostate Graph Draft Demo
 
 ```bash
-cd /home/longz2/common/medgemma/MRI_Agent_v4
+cd /path/to/MRI_Agent_v4
 python - <<'PY'
 from packages.planner.service import create_default_brain_service
 from packages.schemas.mock_data import create_mock_session
@@ -272,7 +272,7 @@ PY
 ### Brain Graph Draft Demo
 
 ```bash
-cd /home/longz2/common/medgemma/MRI_Agent_v4
+cd /path/to/MRI_Agent_v4
 python - <<'PY'
 from packages.planner.service import create_default_brain_service
 from packages.schemas.models import ActionGraph, CaseState
@@ -296,7 +296,7 @@ PY
 ### Patch Demo
 
 ```bash
-cd /home/longz2/common/medgemma/MRI_Agent_v4
+cd /path/to/MRI_Agent_v4
 python - <<'PY'
 from packages.planner.service import create_default_brain_service
 from packages.schemas.mock_data import create_mock_session

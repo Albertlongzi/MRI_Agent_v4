@@ -24,13 +24,18 @@
       ]
     },
     "cp082-qwen-vllm": {
-      "description": "Run GPU-required legacy v3 tools on esplhpc-cp082 over SSH against the shared /common workspace.",
+      "description": "Run GPU-required engine tools on a remote GPU host over SSH against a shared workspace.",
       "launcher": "ssh",
       "conda_env": "qwen_vllm",
       "conda_executable": "/apps/anaconda3/2022.05/bin/conda",
-      "ssh_host": "esplhpc-cp082",
-      "ssh_options": ["-o", "BatchMode=yes", "-o", "ConnectTimeout=30"],
-      "remote_workdir": "/common/longz2/medgemma/MRI_Agent_v4",
+      "ssh_host": "${MRI_AGENT_V4_GPU_HOST}",
+      "ssh_options": [
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=30"
+      ],
+      "remote_workdir": "${MRI_AGENT_V4_REMOTE_WORKDIR}",
       "timeout_seconds": 600,
       "gpu": true,
       "notes": [
@@ -39,19 +44,30 @@
       ]
     },
     "apptainer-medgemma": {
-      "description": "Run heavyweight MRI tools on esplhpc-cp082 inside Apptainer while reusing the validated qwen_vllm conda env from the shared filesystem.",
+      "description": "Run heavyweight MRI tools on a remote GPU host inside Apptainer, reusing a prebuilt conda env from the shared filesystem.",
       "launcher": "apptainer",
-      "ssh_host": "esplhpc-cp082",
-      "ssh_options": ["-o", "BatchMode=yes", "-o", "ConnectTimeout=30"],
-      "remote_workdir": "/common/longz2/medgemma/MRI_Agent_v4",
+      "ssh_host": "${MRI_AGENT_V4_GPU_HOST}",
+      "ssh_options": [
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=30"
+      ],
+      "remote_workdir": "${MRI_AGENT_V4_REMOTE_WORKDIR}",
       "launcher_bin": "/cm/local/apps/apptainer/1.0.1/bin/apptainer",
       "container_image": "docker://python:3.9-slim",
-      "container_workdir": "/common/longz2/medgemma/MRI_Agent_v4",
-      "bind_mounts": ["/common:/common", "/apps:/apps", "/home:/home"],
-      "python_bin": "/home/longz2/.conda/envs/qwen_vllm/bin/python",
+      "container_workdir": "${MRI_AGENT_V4_REMOTE_WORKDIR}",
+      "bind_mounts": [
+        "/common:/common",
+        "/apps:/apps",
+        "/home:/home"
+      ],
+      "python_bin": "${MRI_AGENT_V4_LEGACY_PYTHON}",
       "conda_env": "qwen_vllm",
       "conda_executable": "/apps/anaconda3/2022.05/bin/conda",
-      "env_passthrough": ["CUDA_VISIBLE_DEVICES"],
+      "env_passthrough": [
+        "CUDA_VISIBLE_DEVICES"
+      ],
       "inherit_pythonpath": false,
       "timeout_seconds": 1200,
       "gpu": true,
@@ -87,6 +103,18 @@
         "Kept separate from nnunet-gpu because the nnUNet V1 deps (batchgenerators, MedPy, numpy<2) conflict with the MONAI inference tier.",
         "Provision with: conda env create -f envs/cardiac.yml, then pip install -e external/nnunet_phys_seg."
       ]
+    },
+    "radiomics-cpu": {
+      "description": "CPU runtime for pyradiomics feature extraction (mirrors the BCER 'radiomics' tier).",
+      "launcher": "subprocess",
+      "conda_env": "bcer-radiomics",
+      "timeout_seconds": 1800,
+      "gpu": false,
+      "notes": [
+        "Mirrors the 'radiomics' tier in BCER_open configs/tool_runtime.yml.",
+        "Provision with: conda env create -f envs/radiomics.yml",
+        "Do not host this on the legacy env: its pyradiomics 3.0.1 fails to import against numpy 2.x."
+      ]
     }
   },
   "tool_profiles": {
@@ -96,7 +124,7 @@
     "register_to_reference": "control-plane",
     "materialize_registration": "control-plane",
     "alignment_qc": "control-plane",
-    "extract_roi_features": "legacy-qwen-vllm",
+    "extract_roi_features": "radiomics-cpu",
     "segment_prostate": "apptainer-medgemma",
     "detect_lesion_candidates": "legacy-qwen-vllm",
     "brats_mri_segmentation": "nnunet-gpu",

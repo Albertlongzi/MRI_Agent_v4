@@ -1,32 +1,32 @@
 # V4 Executor Stage Data Contract
 
-更新日期：2026-03-20
+Last updated: 2026-03-20
 
-## 1. 目标
+## 1. Purpose
 
-这份文档定义 `MRI_Agent_v4` prostate demo 当前 executor 的最小真实契约。
+This document defines the minimal real contract that the executor in the `MRI_Agent_v4` prostate demo has to honour.
 
-重点不是“节点跑过了什么”，而是：
+The point is not "what a node happened to run", but:
 
-- 哪些输出只是 UI/审计信息
-- 哪些输出是 downstream 真正消费的关键路径
-- 哪些文件如果不存在，节点就不得宣告为 `succeeded`
+- which outputs exist only for UI or audit purposes
+- which outputs are on the critical path that downstream steps actually consume
+- which files, if absent, must prevent a node from declaring itself `succeeded`
 
-当前策略：
+Current policy:
 
-- `identify_sequences`、`register_to_reference`、`segment_prostate`、`package_vlm_evidence`、`generate_report` 都走真实 v3 tool bridge
-- executor 对关键输出路径做 existence validation
-- `generate_report` 额外做 downstream consistency validation
-- 任一关键输出缺失或 report 语义自相矛盾时，节点标记为 `failed`，graph 不得自然进入误导性的 `completed`
+- `identify_sequences`, `register_to_reference`, `segment_prostate`, `package_vlm_evidence`, and `generate_report` all go through the real v3 tool bridge
+- the executor performs existence validation on critical output paths
+- `generate_report` additionally performs downstream consistency validation
+- if any critical output is missing, or the report contradicts itself semantically, the node is marked `failed` and the graph must not be allowed to drift into a misleading `completed` state
 
-## 2. 统一语义
+## 2. Shared Semantics
 
-- `ok`: tool 调用本身没有抛异常
-- `consumable`: tool 的关键 downstream 输出真实存在，且满足最小一致性校验
-- `succeeded`: 仅当 `ok=true` 且 `consumable=true`
-- `failed`: tool 抛异常，或关键输出缺失，或 downstream consistency check 失败
+- `ok`: the tool call itself did not raise
+- `consumable`: the tool's critical downstream outputs genuinely exist and pass minimal consistency checks
+- `succeeded`: only when `ok=true` and `consumable=true`
+- `failed`: the tool raised, or a critical output is missing, or a downstream consistency check failed
 
-runtime `case_state.json` 的每条 stage record 现在同时记录：
+Every stage record in the runtime `case_state.json` now records all of:
 
 - `ok`
 - `consumable`
@@ -37,31 +37,31 @@ runtime `case_state.json` 的每条 stage record 现在同时记录：
 
 ### 3.1 `identify_sequences`
 
-输入：
+Inputs:
 
 - `dicom_case_dir`
 
-显示用途字段：
+Display-only fields:
 
 - `mapping`
 - `confidence`
 - `series`
 - `note`
 
-downstream 真依赖：
+Real downstream dependencies:
 
 - `mapping`
 - `series_inventory_path`
 - `dicom_meta_path`
 - `dicom_headers_index_path`
 
-必须真实存在的路径：
+Paths that must genuinely exist:
 
 - `series_inventory_path`
 - `dicom_meta_path`
 - `dicom_headers_index_path`
 
-下游消费者：
+Downstream consumers:
 
 - `register_to_reference`
 - `segment_prostate`
@@ -70,126 +70,126 @@ downstream 真依赖：
 
 ### 3.2 `register_to_reference`
 
-输入：
+Inputs:
 
 - `fixed`
 - `moving`
 
-显示用途字段：
+Display-only fields:
 
 - `qc_pngs`
 - `qc_metrics`
 - `note`
 - `warnings`
 
-downstream 真依赖：
+Real downstream dependencies:
 
 - `resampled_path`
 - `transform_path`
 
-必须真实存在的路径：
+Paths that must genuinely exist:
 
 - `resampled_path`
 - `transform_path`
 
-下游消费者：
+Downstream consumers:
 
-- 当前 prostate demo 的后续 report/evidence 主要依赖 stage success 和 artifact index
-- 后续若加入 lesion / feature / QC 节点，应直接消费 `resampled_path`
+- in the current prostate demo, the later report/evidence steps depend mainly on stage success and the artifact index
+- if lesion / feature / QC nodes are added later, they should consume `resampled_path` directly
 
 ### 3.3 `segment_prostate`
 
-输入：
+Inputs:
 
 - `t2w_ref`
 
-显示用途字段：
+Display-only fields:
 
 - `note`
 - `warnings`
 - `degraded_mode`
 
-downstream 真依赖：
+Real downstream dependencies:
 
 - `prostate_mask_path`
 - `zone_mask_path`
 - `t2w_input_path`
 
-必须真实存在的路径：
+Paths that must genuinely exist:
 
 - `prostate_mask_path`
 - `zone_mask_path`
 - `t2w_input_path`
 
-下游消费者：
+Downstream consumers:
 
 - `package_vlm_evidence`
 - `generate_report`
-- 以后新增的 lesion / ROI feature 节点
+- lesion / ROI feature nodes added in the future
 
-说明：
+Notes:
 
-- `degraded_mode=true` 仍允许节点 `succeeded`
-- 但前提是 fallback 仍然真实写出了可读 mask/NIfTI 文件
-- 也就是说 degraded 不等于 fake
+- `degraded_mode=true` still allows the node to be `succeeded`
+- but only on the condition that the fallback genuinely wrote out readable mask/NIfTI files
+- in other words, degraded does not mean fake
 
 ### 3.4 `package_vlm_evidence`
 
-输入：
+Inputs:
 
 - `case_state_path`
 
-显示用途字段：
+Display-only fields:
 
 - `summary`
 
-downstream 真依赖：
+Real downstream dependencies:
 
 - `vlm_evidence_path`
 
-必须真实存在的路径：
+Paths that must genuinely exist:
 
 - `vlm_evidence_path`
 
-下游消费者：
+Downstream consumers:
 
 - `generate_report`
-- 前端 evidence 面板
+- the frontend evidence panel
 
 ### 3.5 `generate_report`
 
-输入：
+Inputs:
 
 - `case_state_path`
 - `domain`
 
-显示用途字段：
+Display-only fields:
 
 - `report_txt_path`
 
-downstream 真依赖：
+Real downstream dependencies:
 
 - `report_json_path`
 - `clinical_report_path`
 
-必须真实存在的路径：
+Paths that must genuinely exist:
 
 - `report_json_path`
 - `clinical_report_path`
 
-额外一致性校验：
+Additional consistency check:
 
-- 如果 `segment_prostate` 节点已经 `succeeded`，则 `report_json_path` 中
-  `lesion_assessment_meta.segmentation_usable` 不得为 `false`
+- if the `segment_prostate` node has already `succeeded`, then
+  `lesion_assessment_meta.segmentation_usable` in `report_json_path` must not be `false`
 
-失败语义：
+Failure semantics:
 
-- 如果 report 文件缺失，`generate_report` 失败
-- 如果 report 内容否认一个已经成功的 segmentation，`generate_report` 失败
+- if the report files are missing, `generate_report` fails
+- if the report content denies a segmentation that already succeeded, `generate_report` fails
 
-## 4. 当前 prostate demo 关键落盘路径
+## 4. Key On-Disk Paths in the Current Prostate Demo
 
-按默认 graph `graph-prostate-demo`：
+Under the default graph `graph-prostate-demo`:
 
 - runtime state: `runtime/graph-prostate-demo/case_state.json`
 - identify artifacts: `artifacts/graph-prostate-demo/01_identify-sequences/`
@@ -198,10 +198,10 @@ downstream 真依赖：
 - vlm bundle: `artifacts/graph-prostate-demo/04_package-vlm-evidence/`
 - report artifacts: `artifacts/graph-prostate-demo/05_generate-report/`
 
-## 5. Agent 4 可直接检查的 pass/fail 规则
+## 5. Pass/Fail Rules Agent 4 Can Check Directly
 
-- `register_to_reference` 为 `succeeded` 时，`resampled_path` 与 `transform_path` 必须存在
-- `segment_prostate` 为 `succeeded` 时，`prostate_mask_path`、`zone_mask_path`、`t2w_input_path` 必须存在
-- `generate_report` 为 `succeeded` 时，`report_json_path` 与 `clinical_report_path` 必须存在
-- 如果 `segment_prostate` 为 `succeeded`，`report.json` 不得包含 `segmentation_usable: false`
-- graph 最终为 `completed` 时，所有关键 stage record 必须 `consumable=true`
+- when `register_to_reference` is `succeeded`, `resampled_path` and `transform_path` must exist
+- when `segment_prostate` is `succeeded`, `prostate_mask_path`, `zone_mask_path`, and `t2w_input_path` must exist
+- when `generate_report` is `succeeded`, `report_json_path` and `clinical_report_path` must exist
+- if `segment_prostate` is `succeeded`, `report.json` must not contain `segmentation_usable: false`
+- when the graph ends up `completed`, every critical stage record must have `consumable=true`

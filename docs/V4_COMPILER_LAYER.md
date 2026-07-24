@@ -1,18 +1,18 @@
 # V4 Compiler Layer
 
-更新日期：2026-03-20
+Last updated: 2026-03-20
 
-这份文档定义 `MRI_Agent_v4` 当前最小 compiler 输入。
+This document defines the minimal compiler input currently used by `MRI_Agent_v4`.
 
-目标很明确：
+The goal is deliberately narrow:
 
-- 不让模型直接拼最终 graph
-- 让 planner 先形成 `IntentSpec`
-- 再由 compiler 按 tool contract / dependency rule / capability expansion rule 材料化成 graph
+- the model must not assemble the final graph itself
+- the planner produces an `IntentSpec` first
+- the compiler then materializes that spec into a graph, driven by tool contracts, dependency rules, and capability expansion rules
 
-## 1. Compiler 输入
+## 1. Compiler Input
 
-当前 compiler 的输入对象是 `IntentSpec`，核心字段包括：
+The compiler's input object is an `IntentSpec`. Its core fields are:
 
 - `intent`
 - `domain`
@@ -25,13 +25,13 @@
 - `available_tools`
 - `case_state`
 
-这个输入只描述意图，不描述最终节点列表。
+This input describes intent only. It does not describe the final node list.
 
 ## 2. Tool Contracts
 
-tool contract 是 compiler 的第一层元数据。
+Tool contracts are the compiler's first layer of metadata.
 
-当前最小字段：
+The current minimal field set:
 
 - `tool_name`
 - `domains`
@@ -41,33 +41,33 @@ tool contract 是 compiler 的第一层元数据。
 - `runtime_profile`
 - `notes`
 
-用途：
+They tell the compiler:
 
-- 告诉 compiler 某个 tool 能做什么
-- 告诉 compiler 某个 tool 需要什么前置输入
-- 告诉 compiler 这个 tool 大概率落在哪个 runtime profile 上
+- what a given tool can do
+- what upstream inputs that tool requires
+- which runtime profile the tool most likely lands on
 
 ## 3. Dependency Rules
 
-dependency rule 是 compiler 的第二层元数据。
+Dependency rules are the compiler's second layer of metadata.
 
-当前最小字段：
+The current minimal field set:
 
 - `rule_name`
 - `target_tool`
 - `depends_on`
 - `reason`
 
-用途：
+They serve to:
 
-- 把“tool 之间怎么接”从 graph 里提出来
-- 让 graph 生成遵循规则，而不是靠模型顺手写节点顺序
+- lift the question of how tools connect to each other out of the graph itself
+- make graph generation follow explicit rules instead of relying on the model to write node ordering by hand
 
 ## 4. Capability Expansion Rules
 
-capability expansion rule 是 compiler 的第三层元数据。
+Capability expansion rules are the compiler's third layer of metadata.
 
-当前最小字段：
+The current minimal field set:
 
 - `rule_name`
 - `domain`
@@ -76,41 +76,41 @@ capability expansion rule 是 compiler 的第三层元数据。
 - `reason`
 - `dependency_overrides`
 
-用途：
+They serve to:
 
-- 根据 capability 自动补工具
-- 根据 capability 自动补依赖
-- 让能力扩展成为规则，而不是硬模板
+- add tools automatically based on capability
+- add dependencies automatically based on capability
+- make capability expansion a matter of rules rather than hard-coded templates
 
 ### Prostate lesion example
 
-如果 intent 里出现 `lesion`、`classify` 或 `roi_features`，compiler 会额外展开：
+If the intent mentions `lesion`, `classify`, or `roi_features`, the compiler additionally expands to:
 
 - `detect_lesion_candidates`
 - `extract_roi_features`
 
-这两个节点不是最终 graph 的“手写模板”，而是 capability expansion rule 的结果。
+These two nodes are not a hand-written template baked into the final graph; they are the result of a capability expansion rule.
 
-## 5. Compiler 输出
+## 5. Compiler Output
 
-compiler 的输出是已材料化的 `ActionGraph`，同时保留 trace：
+The compiler emits a materialized `ActionGraph` along with a trace:
 
 - `selected_tools`
 - `applied_rules`
 - `compiler_input`
 - `warnings`
 
-这让 planner 可以继续做自然语言解释，但不能绕过 compiler 直接构 graph。
+This lets the planner continue to provide natural-language explanations while preventing it from bypassing the compiler and constructing a graph directly.
 
-## 6. 当前最小落地
+## 6. Current Minimal Implementation
 
-已落地的 domain：
+Domains implemented:
 
 - `prostate`
 - `brain`
 - `cardiac`
 
-已落地的 compiler 目标：
+Compiler goals implemented:
 
 - tool auto-selection
 - dependency filling

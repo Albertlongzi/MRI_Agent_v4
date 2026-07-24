@@ -21,7 +21,7 @@ const fallbackSnapshot = {
     case_state: {
       case_id: "prostate_demo_001",
       domain: "prostate",
-      input_root: "/demo/cases/sub-057",
+      input_root: "/demo/cases/sub-019_2",
       sequence_index: {},
       available_modalities: ["T2w", "ADC", "DWI_highb"],
       active_graph_id: "graph-prostate-demo",

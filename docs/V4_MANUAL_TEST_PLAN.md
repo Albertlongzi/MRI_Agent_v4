@@ -1,28 +1,28 @@
 # V4 Manual Test Plan
 
-更新日期：2026-03-20
+Last updated: 2026-03-20
 
-这份文档是给你做实际人工测试用的。
+This document is meant to be used for hands-on manual testing.
 
-目标不是一次性覆盖所有细节，而是用最少的测试轮次回答三个问题：
+The goal is not to cover every detail in one pass, but to answer three questions in as few test rounds as possible:
 
-1. 现在的 `v4` 是否已经能作为真实 workstation backend 使用
-2. 核心闭环是否真的成立
-3. 剩下的问题更偏产品体验，还是底层真实性
+1. Whether `v4` can already be used as a real workstation backend
+2. Whether the core end-to-end loop genuinely holds up
+3. Whether the remaining problems are more about product experience or about whether the underlying work is real
 
-## 1. 测试前准备
+## 1. Before You Start
 
-推荐环境：
+Recommended environment:
 
-- API 运行在当前机器
-- planner LLM 走 `esplhpc-cp082`
-- GPU-heavy segmentation 允许走 `cp082`
+- The API runs on the local machine
+- The planner LLM runs on `<gpu-node>`
+- GPU-heavy segmentation is allowed to run on `<gpu-node>`
 
-推荐先确认这些命令：
+Confirm these commands first:
 
 ```bash
-cd /home/longz2/common/medgemma/MRI_Agent_v4
-PYTHONPATH=/home/longz2/common/medgemma/MRI_Agent_v4 .venv/bin/pytest -q
+cd /path/to/MRI_Agent_v4
+PYTHONPATH=/path/to/MRI_Agent_v4 .venv/bin/pytest -q
 ```
 
 ```bash
@@ -30,122 +30,122 @@ curl http://127.0.0.1:8008/api/health
 curl http://127.0.0.1:8008/api/planner/health
 ```
 
-如果 API 没起：
+If the API is not up:
 
 ```bash
-cd /home/longz2/common/medgemma/MRI_Agent_v4
-PYTHONPATH=/home/longz2/common/medgemma/MRI_Agent_v4 .venv/bin/python -m apps.api.main
+cd /path/to/MRI_Agent_v4
+PYTHONPATH=/path/to/MRI_Agent_v4 .venv/bin/python -m apps.api
 ```
 
-## 2. 第一轮：Happy Path
+## 2. Round One: Happy Path
 
-目标：
+Goal:
 
-- 确认一条 prostate case 从 chat 到 report 真能闭环
+- Confirm that a single prostate case really can go from chat all the way to a report
 
-建议输入：
+Suggested input:
 
-- case: `/common/longz2/medgemma/MRI_Agent/demo/cases/sub-057`
+- case: `/path/to/BCER/demo/cases/sub-019_2`
 - chat:
   `Inspect this prostate case, register ADC to T2, segment the gland, and give me a short report.`
 
-你要看：
+What to look for:
 
-- `/api/chat` 返回 `mode=graph`
-- `/api/graph` 出现完整 workflow
-- `/api/execute/until-done` 最终 `graph_status=completed`
-- `report.json` 存在
-- `clinical_report.md` 存在
-- `report.json` 里 `lesion_assessment_meta.segmentation_usable=true`
-- `clinical_report.md` 不再出现：
+- `/api/chat` returns `mode=graph`
+- `/api/graph` shows a complete workflow
+- `/api/execute/until-done` ends with `graph_status=completed`
+- `report.json` exists
+- `clinical_report.md` exists
+- `report.json` has `lesion_assessment_meta.segmentation_usable=true`
+- `clinical_report.md` no longer contains:
   - `missing ADC and/or segmentation issues`
   - `Pipeline could not reliably assess lesions`
 
-判定：
+Verdict:
 
-- 如果这些都成立，说明当前最核心的真实性闭环已经成立
+- If all of these hold, the most important loop — the one that shows the pipeline is doing real work end to end — is in place
 
-## 3. 第二轮：Patch / Review / Continue
+## 3. Round Two: Patch / Review / Continue
 
-目标：
+Goal:
 
-- 确认 planner patch 和 human-in-the-loop 现在是真能力，不是摆设
+- Confirm that planner patching and human-in-the-loop are real capabilities now, not just for show
 
-建议流程：
+Suggested procedure:
 
-1. 先注册同一个 case
-2. chat 输入：
+1. Register the same case first
+2. Enter in chat:
    `pause before segmentation`
-3. 查看 graph/proposal
-4. apply latest proposal
-5. 执行到 checkpoint
-6. 再继续执行到完成
+3. Inspect the graph and the proposal
+4. Apply the latest proposal
+5. Execute up to the checkpoint
+6. Then continue executing to completion
 
-你要看：
+What to look for:
 
-- planner 返回 `mode=patch`
-- graph 中真的插入了 review checkpoint
-- apply patch 后 graph version 有变化
-- execution 会停在 checkpoint，而不是直接越过
-- 继续执行后最终仍可完成
+- The planner returns `mode=patch`
+- A review checkpoint really is inserted into the graph
+- The graph version changes after the patch is applied
+- Execution stops at the checkpoint instead of running straight past it
+- Execution can still reach completion after being resumed
 
-判定：
+Verdict:
 
-- 如果成立，说明 graph patch 现在已经是可操作能力
+- If this holds, graph patching is now an operable capability
 
-## 4. 第三轮：Recovery / Rerun
+## 4. Round Three: Recovery / Rerun
 
-目标：
+Goal:
 
-- 确认失败后不是只能 reset 整图
+- Confirm that a failure does not leave you with no option but to reset the whole graph
 
-建议流程：
+Suggested procedure:
 
-1. 找一个节点手动触发失败，或选择已有失败 run
-2. 调 `POST /api/execute/rerun-from-node`
-3. 再执行
+1. Force a node to fail manually, or pick an existing failed run
+2. Call `POST /api/execute/rerun-from-node`
+3. Execute again
 
-你要看：
+What to look for:
 
-- 目标 node 变成 `ready`
-- downstream 变成 `planned`
-- old artifact 没被覆盖
-- new artifact 带新的 attempt
-- graph 最后能恢复执行
+- The target node becomes `ready`
+- Downstream nodes become `planned`
+- Old artifacts are not overwritten
+- New artifacts carry a new attempt
+- The graph can eventually resume execution
 
-重点观察：
+Pay particular attention to:
 
-- event stream
-- artifact metadata
-- attempt history
+- The event stream
+- Artifact metadata
+- Attempt history
 
-判定：
+Verdict:
 
-- 如果成立，说明 recovery 这条线已经从 demo 进入可用状态
+- If this holds, the recovery path has moved from demo to usable
 
-## 5. 第四轮：Runtime / GPU / Container
+## 5. Round Four: Runtime / GPU / Container
 
-目标：
+Goal:
 
-- 确认 GPU-heavy tool 确实在正确 runtime 上跑
+- Confirm that GPU-heavy tools really do run on the correct runtime
 
-建议看：
+Where to look:
 
-- `segment_prostate` 相关 node outputs
-- runtime case state
-- provenance / runtime profile
+- Node outputs related to `segment_prostate`
+- The runtime case state
+- Provenance / runtime profile
 
-你要确认：
+What to confirm:
 
-- `runtime_profile=apptainer-medgemma` 或预期 profile
+- `runtime_profile=apptainer-medgemma`, or whichever profile you expect
 - `launcher=apptainer`
-- `host=esplhpc-cp082`
-- 产物真实存在，不是字符串
+- `host=<gpu-node>`
+- The outputs really exist, rather than being strings
 
-如果你想直接做 smoke：
+If you want to run a smoke test directly:
 
 ```bash
-cd /home/longz2/common/medgemma/MRI_Agent_v4
+cd /path/to/MRI_Agent_v4
 .venv/bin/python - <<'PY'
 import json
 from pathlib import Path
@@ -183,46 +183,46 @@ print(result.data.get("prostate_mask_path"))
 PY
 ```
 
-## 6. 第五轮：前端联调体验
+## 6. Round Five: Frontend Integration Experience
 
-目标：
+Goal:
 
-- 判断剩下的问题偏 backend 还是 frontend UX
+- Judge whether the remaining problems lean backend or frontend UX
 
-你实际使用前端时重点看：
+While actually using the frontend, focus on:
 
-- graph 更新是否及时
-- artifact 点击是否直达
-- report 是否容易读
-- checkpoint / rerun 是否容易理解
-- provenance 是否足够看懂
+- Whether the graph updates promptly
+- Whether clicking an artifact takes you straight to it
+- Whether the report is easy to read
+- Whether checkpoints and reruns are easy to understand
+- Whether the provenance is legible enough
 
-这轮你主要记三类问题：
+In this round, record three kinds of problem:
 
-- `真实性问题`
-- `控制流问题`
-- `展示/交互问题`
+- `Authenticity problems`
+- `Control-flow problems`
+- `Presentation / interaction problems`
 
-## 7. 建议你记录的问题格式
+## 7. Suggested Format For Recording Issues
 
-每个问题尽量按这个格式记：
+Try to record each issue in this format:
 
 ```text
-标题：
-步骤：
-预期：
-实际：
-涉及 graph_id / node_id：
-涉及 artifact 路径：
-是否可稳定复现：
+Title:
+Steps:
+Expected:
+Actual:
+graph_id / node_id involved:
+Artifact path involved:
+Reliably reproducible:
 ```
 
-## 8. 我最建议你先测的三项
+## 8. The Three Things I Would Test First
 
-如果你时间有限，先做这三个：
+If you are short on time, do these three:
 
-1. prostate happy path 到 report
-2. pause-before-segmentation patch
-3. rerun-from-node
+1. The prostate happy path through to a report
+2. The pause-before-segmentation patch
+3. `rerun-from-node`
 
-这三项最能说明当前 `v4` 是不是已经从“工程修复阶段”进入“可以真实试用阶段”。
+These three do the most to show whether `v4` has moved out of the "engineering repair" phase and into the "ready for real trial use" phase.

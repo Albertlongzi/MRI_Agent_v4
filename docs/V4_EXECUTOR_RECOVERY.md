@@ -1,12 +1,12 @@
 # V4 Executor Recovery / Rerun Semantics
 
-审计日期：2026-03-20
+Audit date: 2026-03-20
 
-本文冻结 `MRI_Agent_v4` 当前 executor recovery 语义：rerun-from-node、attempt history、failure -> patch -> continue。
+This document freezes the executor recovery semantics currently implemented in `MRI_Agent_v4`: rerun-from-node, attempt history, and failure -> patch -> continue.
 
-## 1. 新增状态与字段
+## 1. New States and Fields
 
-`ActionNode` 新增最小 recovery 字段：
+`ActionNode` gains a minimal set of recovery fields:
 
 - `attempt_count`
 - `current_attempt_id`
@@ -14,7 +14,7 @@
 - `supersedes`
 - `attempt_history`
 
-`attempt_history` 的单条记录最小包含：
+Each record in `attempt_history` contains at least:
 
 - `attempt_id`
 - `status`
@@ -28,51 +28,51 @@
 - `error`
 - `output_snapshot`
 
-artifact metadata 现在也会带：
+Artifact metadata now also carries:
 
 - `attempt_id`
 - `rerun_from`
 - `supersedes`
 
-runtime `case_state.json` 的 stage record 现在会带：
+Stage records in the runtime `case_state.json` now carry:
 
 - `attempt_id`
 - `rerun_from`
 - `supersedes`
 
-## 2. Recovery 状态机
+## 2. Recovery State Machine
 
-当前最小状态机：
+The current minimal state machine:
 
 - `failed`
-  - 节点执行失败，graph 进入 `failed`
+  - The node failed to execute and the graph moves to `failed`
 - `patched`
-  - human patch 已落地，目标节点被标记为可继续恢复
-  - graph 进入 `paused`
+  - A human patch has landed and the target node is marked as ready to resume
+  - The graph moves to `paused`
 - `ready`
-  - 节点可直接重新执行
+  - The node can be executed again immediately
 - `running`
-  - 当前 attempt 正在执行
+  - The current attempt is executing
 - `succeeded`
-  - 当前 attempt 成功
+  - The current attempt succeeded
 - `planned`
-  - downstream 已失效，但要等上游恢复后再执行
+  - Downstream work has been invalidated and waits for upstream recovery before it runs
 
-语义区分：
+The two rerun semantics are distinct:
 
 - `reset`
-  - 新 graph / 新 run
-  - 清掉旧 runtime workspace
+  - A new graph / a new run
+  - Clears the old runtime workspace
 - `rerun-from-node`
-  - 同一 graph 上的新 attempt
-  - upstream 保留
-  - target + downstream 失效后重跑
+  - A new attempt on the same graph
+  - Upstream is preserved
+  - The target plus its downstream are invalidated and re-run
 
-## 3. Rerun-From-Node 定义
+## 3. Rerun-From-Node Definition
 
 `POST /api/execute/rerun-from-node`
 
-请求体：
+Request body:
 
 ```json
 {
@@ -81,135 +81,135 @@ runtime `case_state.json` 的 stage record 现在会带：
 }
 ```
 
-精确定义：
+Precise definition:
 
-1. 找到目标节点。
-2. 计算目标节点及其所有 downstream。
-3. upstream 节点保持不变。
-4. target 节点：
-   - 记录 `rerun_from=<target>`
-   - 记录 `supersedes=<latest_attempt_id>`
-   - 状态改为 `ready`
-5. downstream 节点：
-   - 记录 `rerun_from=<target>`
-   - 状态改为 `planned`
-6. 当前 graph version +1。
-7. 追加 `rerun_requested` event。
+1. Locate the target node.
+2. Compute the target node and all of its downstream nodes.
+3. Upstream nodes are left unchanged.
+4. The target node:
+   - Records `rerun_from=<target>`
+   - Records `supersedes=<latest_attempt_id>`
+   - Moves to status `ready`
+5. Downstream nodes:
+   - Record `rerun_from=<target>`
+   - Move to status `planned`
+6. The current graph version is incremented by 1.
+7. A `rerun_requested` event is appended.
 
-注意：
+Note:
 
-- rerun 不会删除旧 artifact。
-- rerun 也不会覆盖旧 attempt history。
-- 新 attempt 真正开始时，才会生成新的 `attempt_id`。
+- A rerun never deletes old artifacts.
+- A rerun never overwrites the existing attempt history.
+- A new `attempt_id` is generated only once the new attempt actually starts.
 
 ## 4. Failure -> Patch -> Continue
 
-当前闭环：
+The current loop:
 
-1. 某 node `failed`
-2. operator/apply patch
-3. patch 直接影响的 node 标为 `patched`
-4. downstream 标为 `planned`
-5. graph 从 `failed` 转为 `paused`
-6. 调 `execute_next` 或 `execute_until_done`
-7. executor 从 `patched` node 继续执行
+1. Some node reaches `failed`
+2. The operator applies a patch
+3. Nodes directly affected by the patch are marked `patched`
+4. Downstream nodes are marked `planned`
+5. The graph moves from `failed` to `paused`
+6. Call `execute_next` or `execute_until_done`
+7. The executor resumes from the `patched` node
 
-当前 patch apply 后的 invalidation 规则：
+Invalidation rules that currently apply once a patch has been applied:
 
 - `update_node`
 - `reroute_dependency`
 - `insert_checkpoint`
 
-这些操作会触发 target + downstream 失效并重跑。
+These operations invalidate the target plus its downstream nodes and cause them to be re-run.
 
-当前 human patch 边界：
+Current boundaries on human patches:
 
-- `editable=false` 的 node 不允许 `update_node`
-- `editable=false` 的 node 不允许 `reroute_dependency`
+- `update_node` is not allowed on a node with `editable=false`
+- `reroute_dependency` is not allowed on a node with `editable=false`
 
-## 5. 旧 Artifact 如何保留
+## 5. How Old Artifacts Are Retained
 
-保留策略：
+Retention policy:
 
-- graph-level `artifacts` 只追加，不回收旧 artifact
-- 新 attempt 产物写入新的 step output 目录
-- 旧 artifact 保留其旧的 `attempt_id`
-- 新 artifact 带新的 `attempt_id`
-- node 当前 `artifact_refs` 只指向当前 attempt 的最新产物
+- The graph-level `artifacts` list is append-only; old artifacts are never reclaimed
+- Outputs from a new attempt are written to a new step output directory
+- Old artifacts keep their original `attempt_id`
+- New artifacts carry the new `attempt_id`
+- A node's current `artifact_refs` point only at the latest outputs of the current attempt
 
-因此：
+Consequently:
 
-- audit 可以同时看到 old/new attempt artifact
-- 不会出现静默覆盖
-- rerun 后 UI 可以按 `artifact.metadata.attempt_id` 分组
+- An audit can see artifacts from both the old and the new attempt
+- Nothing is ever silently overwritten
+- After a rerun the UI can group artifacts by `artifact.metadata.attempt_id`
 
-## 6. Event 与 Graph Version
+## 6. Events and Graph Version
 
-事件策略：
+Event policy:
 
-- `node_started` / `node_finished` / `node_failed` payload 带 `attempt_id`
-- `artifact_added` payload 带 `attempt_id`
-- `rerun_requested` 明确记录受影响节点
-- `patch_applied` 明确记录 `affected_nodes`
+- `node_started` / `node_finished` / `node_failed` payloads carry `attempt_id`
+- `artifact_added` payloads carry `attempt_id`
+- `rerun_requested` explicitly records the affected nodes
+- `patch_applied` explicitly records `affected_nodes`
 
-version 策略：
+Version policy:
 
-- 每次 node 执行完成或失败：`graph.version += 1`
-- 每次 patch apply：`graph.version += 1`
-- 每次 rerun request：`graph.version += 1`
+- Every time a node finishes or fails: `graph.version += 1`
+- Every time a patch is applied: `graph.version += 1`
+- Every time a rerun is requested: `graph.version += 1`
 
-attempt 与 version 关系：
+How attempts relate to versions:
 
-- version 是 graph mutation 序列号
-- attempt 是 node execution 序列号
-- 二者不等价，但都可审计
+- A version is a graph mutation sequence number
+- An attempt is a node execution sequence number
+- The two are not equivalent, but both are auditable
 
-## 7. API 变化
+## 7. API Changes
 
-新增：
+Added:
 
 - `POST /api/execute/rerun-from-node`
 
-保留：
+Unchanged:
 
 - `POST /api/proposals/apply-latest`
 - `POST /api/execute/next`
 - `POST /api/execute/until-done`
 
-当前“continue”语义不需要新接口：
+The current "continue" semantics need no new endpoint:
 
-- patch apply 后直接继续调 `execute_next` / `execute_until_done`
+- After a patch has been applied, simply call `execute_next` / `execute_until_done` again
 
-## 8. 已验证路径
+## 8. Verified Paths
 
-自动化已验证：
+Verified by automated tests:
 
-- 故障注入后 `failed -> patch -> continue -> succeeded`
-- `rerun-from-node` 后 old/new attempt artifact 并存
-- 相关回归共 `7 passed`
+- `failed -> patch -> continue -> succeeded` after fault injection
+- Old and new attempt artifacts coexist after `rerun-from-node`
+- The related regression suite reports `7 passed`
 
-命令：
+Command:
 
 ```bash
-cd /home/longz2/common/medgemma/MRI_Agent_v4
-PYTHONPATH=/home/longz2/common/medgemma/MRI_Agent_v4/.venv/lib/python3.9/site-packages:$PYTHONPATH \
+cd /path/to/MRI_Agent_v4
+PYTHONPATH=/path/to/MRI_Agent_v4/.venv/lib/python3.9/site-packages:$PYTHONPATH \
 python -m pytest -q tests/test_executor_recovery.py tests/test_executor_contracts.py tests/test_state_api.py
 ```
 
-真实 GPU 验证：
+Verified on real GPU hardware:
 
-- 已确认执行面会把 GPU step 转到 `ssh esplhpc-cp082`
-- 已确认 rerun request、attempt history、runtime stage records 都能落盘
-- 当前 `segment_prostate` 在远端 `apptainer` worker 上因为环境缺 `pydantic_core` 而失败
+- Confirmed that the execution plane dispatches GPU steps over `ssh <gpu-node>`
+- Confirmed that rerun requests, attempt history, and runtime stage records are all persisted to disk
+- `segment_prostate` currently fails on the remote `apptainer` worker because that environment is missing `pydantic_core`
 
-这说明：
+Which shows that:
 
-- recovery/rerun 机制本身已工作
-- 当前残余阻塞在 runtime/container 环境，不在本轮 executor scope
+- The recovery/rerun mechanism itself works
+- The remaining blocker is the runtime/container environment, which is outside the scope of this round of executor work
 
-## 9. 残余限制
+## 9. Remaining Limitations
 
-- 还没有 bounded retry policy；当前是 operator-driven rerun
-- 还没有专门的 graph-level recovery UI
-- patch 影响节点的判定仍是最小规则，不是完整静态分析
-- 远端 `apptainer` worker 环境仍可能阻塞真实 GPU rerun 成功收敛
+- There is no bounded retry policy yet; reruns are currently operator-driven
+- There is no dedicated graph-level recovery UI yet
+- Deciding which nodes a patch affects still uses a minimal rule set rather than full static analysis
+- The remote `apptainer` worker environment can still block a real GPU rerun from converging successfully

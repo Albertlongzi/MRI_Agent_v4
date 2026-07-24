@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -73,13 +74,37 @@ class RuntimeProfile:
         }
 
 
+def _expand(value: Any) -> Any:
+    """Expand ``$VAR`` / ``${VAR}`` and a leading ``~`` in every config string.
+
+    Site-specific values -- cluster hostnames, shared workspace paths, the
+    absolute python of a local conda env -- must not be baked into a public
+    repo, but they still have to be settable. The shipped config therefore
+    writes them as ``${MRI_AGENT_V4_*}`` references, resolved here from the
+    environment; see ``.env.example``.
+
+    Note this is ``os.path.expandvars`` semantics: there is no ``${VAR:-default}``
+    form, and an unset variable is left as the literal ``${VAR}`` rather than
+    becoming an empty string. That is deliberate -- an unconfigured remote
+    profile then fails with a visibly bogus hostname or path instead of
+    silently running somewhere unintended.
+    """
+    if isinstance(value, str):
+        return os.path.expanduser(os.path.expandvars(value))
+    if isinstance(value, list):
+        return [_expand(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _expand(item) for key, item in value.items()}
+    return value
+
+
 def _read_config() -> Dict[str, Any]:
     if not CONFIG_PATH.exists():
         return {"version": 1, "profiles": {}, "tool_profiles": {}}
     payload = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError(f"runtime profile config must be a JSON object: {CONFIG_PATH}")
-    return payload
+    return _expand(payload)
 
 
 @lru_cache(maxsize=1)
