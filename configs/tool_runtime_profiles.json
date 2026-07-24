@@ -62,14 +62,30 @@
       ]
     },
     "nnunet-gpu": {
-      "description": "GPU-heavy segmentation/classification runtime with nnUNet-style dependencies.",
+      "description": "GPU-heavy MONAI/nnUNet segmentation runtime (BCER 'inference' tier).",
       "launcher": "subprocess",
+      "conda_env": "bcer-inference",
       "conda_executable": "/apps/anaconda3/2022.05/bin/conda",
-      "timeout_seconds": 90,
+      "timeout_seconds": 3600,
       "gpu": true,
       "notes": [
-        "Use for segmentation/classification tools with conflicting torch or nnUNet requirements.",
+        "Mirrors the 'inference' tier of BCER_open configs/tool_runtime.yml.",
+        "conda_env is mandatory: without it _worker_command() falls back to sys.executable and GPU segmentation would silently run inside the API interpreter.",
+        "Provision with: conda env create -f envs/inference.yml",
         "Can later be migrated behind Apptainer if the conda stack becomes brittle."
+      ]
+    },
+    "cardiac-nnunet-gpu": {
+      "description": "GPU runtime for the vendored nnUNet V1 cardiac cine fork (BCER 'cardiac' tier).",
+      "launcher": "subprocess",
+      "conda_env": "bcer-cardiac-seg",
+      "conda_executable": "/apps/anaconda3/2022.05/bin/conda",
+      "timeout_seconds": 3600,
+      "gpu": true,
+      "notes": [
+        "Mirrors the 'cardiac' tier of BCER_open configs/tool_runtime.yml.",
+        "Kept separate from nnunet-gpu because the nnUNet V1 deps (batchgenerators, MedPy, numpy<2) conflict with the MONAI inference tier.",
+        "Provision with: conda env create -f envs/cardiac.yml, then pip install -e external/nnunet_phys_seg."
       ]
     }
   },
@@ -83,10 +99,9 @@
     "extract_roi_features": "legacy-qwen-vllm",
     "segment_prostate": "apptainer-medgemma",
     "detect_lesion_candidates": "legacy-qwen-vllm",
-    "correct_prostate_distortion": "legacy-qwen-vllm",
     "brats_mri_segmentation": "nnunet-gpu",
     "classify_brain_glioma_grade": "legacy-qwen-vllm",
-    "segment_cardiac_cine": "nnunet-gpu",
+    "segment_cardiac_cine": "cardiac-nnunet-gpu",
     "classify_cardiac_cine_disease": "legacy-qwen-vllm",
     "reconstruct_grappa": "legacy-qwen-vllm",
     "rag_search": "control-plane",

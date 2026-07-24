@@ -13,7 +13,14 @@ import sys
 import time
 from typing import Any, Dict, List, Optional, Sequence
 
-from .bridge import BRIDGE_MODULE, DEFAULT_V3_REPO_NAME, resolve_v3_root
+from .bridge import (
+    BRIDGE_MODULE,
+    BRIDGE_SCHEMAS_MODULE,
+    DEFAULT_V3_REPO_NAME,
+    V3_ROOT_ENV_VARS,
+    ensure_import_root,
+    resolve_v3_root,
+)
 from .runtime_profiles import get_runtime_profile, resolve_tool_runtime_profile
 
 
@@ -65,10 +72,11 @@ class V3ToolRunResult:
     provenance: Dict[str, Any] = field(default_factory=dict)
 
 
+# Demo cases shipped by the open engine repo (`BCER_open/demo/cases/`).
 _DOMAIN_DEMO_CASES: Dict[str, List[str]] = {
-    "prostate": ["demo/cases/sub-057", "demo/cases/sub001"],
+    "prostate": ["demo/cases/sub-019_2"],
     "brain": ["demo/cases/Brats18_CBICA_AAM_1"],
-    "cardiac": ["demo/cases/cardiac_cine"],
+    "cardiac": ["demo/cases/acdc_multiseq_patient061_ed"],
 }
 
 
@@ -77,12 +85,17 @@ def _local_hostname() -> str:
 
 
 def _ensure_v3_import_root() -> Path:
+    """Thin wrapper over the single shared helper in `bridge.py`.
+
+    The sys.path rules live in `bridge.ensure_import_root` -- keep them there so
+    the in-process and worker paths can never drift apart.
+    """
     v3_root = resolve_v3_root()
     if v3_root is None:
-        raise RuntimeError(f"v3 repo '{DEFAULT_V3_REPO_NAME}' not found")
-    import_root = str(v3_root.parent.resolve())
-    if import_root not in sys.path:
-        sys.path.insert(0, import_root)
+        raise RuntimeError(
+            f"engine repo '{DEFAULT_V3_REPO_NAME}' not found; set {V3_ROOT_ENV_VARS[0]}"
+        )
+    ensure_import_root(v3_root)
     return v3_root
 
 
@@ -357,7 +370,7 @@ def _run_v3_tool_inproc(
 ) -> V3ToolRunResult:
     _ensure_v3_import_root()
     tool_registry_module = importlib.import_module(BRIDGE_MODULE)
-    schemas_module = importlib.import_module("MRI_Agent.commands.schemas")
+    schemas_module = importlib.import_module(BRIDGE_SCHEMAS_MODULE)
     build_shell_registry = getattr(tool_registry_module, "build_shell_registry")
     ToolContext = getattr(schemas_module, "ToolContext")
 

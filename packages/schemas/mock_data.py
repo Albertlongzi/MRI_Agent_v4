@@ -17,10 +17,24 @@ from packages.tools import resolve_demo_case
 
 
 def _default_demo_input_root() -> str:
+    """Absolute path of the prostate demo case that seeds the mock session.
+
+    There is deliberately no synthetic fallback: a made-up path would flow into
+    ``CaseState.input_root`` and every downstream tool call would fail far away
+    from the real cause. ``resolve_demo_case`` already stats each candidate and
+    only returns directories that exist, so ``None`` means the demo corpus is
+    genuinely unreachable and the deployment must be fixed.
+    """
     demo_case = resolve_demo_case("prostate")
-    if demo_case is not None:
-        return str(demo_case)
-    return "/demo/cases/prostate_demo_001"
+    if demo_case is None:
+        raise RuntimeError(
+            "Cannot resolve the prostate demo case: resolve_demo_case('prostate') "
+            "found no existing directory under the engine repo's demo/cases/. Point "
+            "BCER_ROOT (aliases: BCER_OPEN_ROOT, MRI_AGENT_V3_ROOT, MRI_AGENT_ROOT) "
+            "at a checkout that ships the demo corpus, and populate it with "
+            "demo/build_demo_cases.sh."
+        )
+    return str(demo_case)
 
 
 def _mock_nodes() -> List[ActionNode]:

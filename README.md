@@ -1,4 +1,6 @@
-# MRI_Agent v4
+# MRI_Agent_v4 (Work in Progress)
+
+**Note:** This is a work-in-progress (half-finished) open-source repository for the next iteration of the radiology MRI workstation agent. 
 
 `MRI_Agent_v4` is the next product line for a natural-language radiology MRI
 workstation.
@@ -107,6 +109,41 @@ Then open:
 ```text
 http://127.0.0.1:8008
 ```
+
+## Tool Bridge Engine Repo (`BCER_ROOT`)
+
+The tool bridge in `packages/tools` loads the real tool registry from the open
+BCER engine repo (`BCER_open`). Point `BCER_ROOT` at your checkout:
+
+```bash
+export BCER_ROOT=/path/to/BCER_open
+```
+
+See `.env.example` for the full list. Notes:
+
+- `BCER_ROOT` may be the repo root itself (`/path/to/BCER_open`) or a parent
+  directory that contains `BCER_open/`.
+- The bridge places that directory **itself** on `sys.path`, because `BCER_open`
+  uses top-level absolute imports (`from commands.registry import ToolRegistry`)
+  and the bridge imports `mri_agent_shell.tool_registry`.
+- If `BCER_ROOT` is set but does not resolve to a real checkout, the bridge
+  reports `status: "down"` rather than silently falling back to another repo.
+- If it is unset, the bridge auto-discovers a sibling `BCER_open/` checkout next
+  to this repo.
+- Legacy aliases `MRI_AGENT_V3_ROOT` and `MRI_AGENT_ROOT` are still honoured.
+- The resolved root is prepended to `sys.path`, so it wins over any stale
+  `pip install -e` of an older engine checkout recorded in
+  `site-packages/easy-install.pth`. If your interpreter has such an entry,
+  removing it is still recommended.
+
+Verify the bridge:
+
+```bash
+BCER_ROOT=/path/to/BCER_open .venv/bin/python -c \
+  "from packages.tools.bridge import bridge_health; print(bridge_health())"
+```
+
+A healthy bridge reports `status: "ok"` with 20 tools and 3 domains.
 
 Available API routes:
 

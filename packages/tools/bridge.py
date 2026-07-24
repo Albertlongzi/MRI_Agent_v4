@@ -10,9 +10,30 @@ import traceback
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
-BRIDGE_MODULE = "MRI_Agent.mri_agent_shell.tool_registry"
-DEFAULT_V3_REPO_NAME = "MRI_Agent"
-V3_ROOT_ENV_VARS: Tuple[str, ...] = ("MRI_AGENT_V3_ROOT", "MRI_AGENT_ROOT")
+# Import model
+# ------------
+# The open-source engine repo (`BCER_open`) uses TOP-LEVEL absolute imports
+# (`from commands.registry import ToolRegistry`), so the repo ROOT ITSELF must be
+# on `sys.path`. The older private layout used package-relative imports
+# (`from MRI_Agent.commands.registry import ...`) and therefore needed the repo's
+# PARENT on `sys.path`. Do not "restore" the parent-based behaviour.
+BRIDGE_MODULE = os.environ.get("BCER_BRIDGE_MODULE", "").strip() or "mri_agent_shell.tool_registry"
+BRIDGE_SCHEMAS_MODULE = os.environ.get("BCER_SCHEMAS_MODULE", "").strip() or "commands.schemas"
+DEFAULT_V3_REPO_NAME = "BCER_open"
+
+# Checked in order. `BCER_ROOT` is the canonical name; the `MRI_AGENT_*` names are
+# kept for backwards compatibility with existing shell profiles.
+V3_ROOT_ENV_VARS: Tuple[str, ...] = (
+    "BCER_ROOT",
+    "BCER_OPEN_ROOT",
+    "MRI_AGENT_V3_ROOT",
+    "MRI_AGENT_ROOT",
+)
+
+# A directory only counts as an engine repo root if it contains these. This is what
+# lets an explicitly-configured `BCER_ROOT` be accepted AS-IS instead of being
+# silently rewritten into `<BCER_ROOT>/BCER_open` and then missing.
+REPO_ROOT_MARKERS: Tuple[str, ...] = ("mri_agent_shell", "commands")
 
 
 @dataclass(frozen=True)
@@ -47,47 +68,120 @@ class BridgeHealth:
         }
 
 
+def looks_like_v3_root(path: Path) -> bool:
+    """True when `path` is an engine repo checkout (not just any directory)."""
+    try:
+        if not path.is_dir():
+            return False
+        return all((path / marker).is_dir() for marker in REPO_ROOT_MARKERS)
+    except OSError:
+        return False
+
+
 def _candidate_v3_roots() -> List[Path]:
+    """Ordered candidate repo roots.
+
+    Rule: if ANY of `V3_ROOT_ENV_VARS` is set, only env-derived candidates are
+    considered. An explicit configuration that points somewhere wrong must fail
+    loudly ("not found") rather than silently falling back to some other checkout
+    that happens to sit next to this repo -- the previous implementation appended
+    the repo name unconditionally, so `BCER_ROOT=/path/BCER_open` resolved to
+    `/path/BCER_open/BCER_open`, missed, and then loaded a hard-coded sibling repo.
+    """
     candidates: List[Path] = []
+    seen: set = set()
+
+    def _add(path: Path) -> None:
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            candidates.append(path)
+
+    configured = False
     for env_var in V3_ROOT_ENV_VARS:
         raw = os.environ.get(env_var)
-        if not raw:
+        if not raw or not raw.strip():
             continue
-        path = Path(raw).expanduser()
-        if path.name == DEFAULT_V3_REPO_NAME:
-            candidates.append(path)
-        else:
-            candidates.append(path / DEFAULT_V3_REPO_NAME)
+        configured = True
+        path = Path(raw.strip()).expanduser()
+        # Accept the configured path as-is when it already is a repo root; only
+        # append the repo name when the env var points at a PARENT directory.
+        _add(path)
+        _add(path / DEFAULT_V3_REPO_NAME)
 
+    if configured:
+        return candidates
+
+    # No explicit configuration: look for a `BCER_open` checkout near this repo.
+    # index 2 == the v4 repo root, so 3/4 are its parent and grandparent.
     here = Path(__file__).resolve()
-    medgemma_root = here.parents[3]
-    candidates.append(medgemma_root / DEFAULT_V3_REPO_NAME)
+    for depth in (3, 4):
+        if depth < len(here.parents):
+            _add(here.parents[depth] / DEFAULT_V3_REPO_NAME)
     return candidates
 
 
 @lru_cache(maxsize=1)
 def resolve_v3_root() -> Optional[Path]:
     for candidate in _candidate_v3_roots():
-        if candidate.exists() and candidate.is_dir():
+        if looks_like_v3_root(candidate):
             return candidate.resolve()
     return None
 
 
-def _ensure_import_root(v3_root: Optional[Path]) -> Optional[str]:
-    if v3_root is None:
+def ensure_import_root(v3_root: Optional[Path] = None) -> Optional[str]:
+    """Put the engine repo ROOT (not its parent) on `sys.path`.
+
+    Shared by `bridge.py` and `runtime.py` -- do not duplicate this logic.
+
+    Position: prepended, deliberately. Some environments carry a legacy
+    `pip install -e` of the older private engine repo, which setuptools records in
+    `site-packages/easy-install.pth` and force-prepends onto `sys.path`. That entry
+    also provides a top-level `mri_agent_shell` / `commands`, so merely appending
+    the configured root would resolve `BRIDGE_MODULE` to the *other* checkout while
+    still reporting the configured `v3_root` -- the exact silent-wrong-repo failure
+    this bridge must not have.
+
+    Namespace side effect: adding the repo root injects the top-level names
+    `agent`, `benchmark`, `commands`, `config`, `core`, `llm`, `mri_agent_shell`,
+    `runtime`, `scripts` and `tools` into this process. None of them shadow v4's
+    own top-level packages: v4 owns `apps`, `packages` and `scripts`, and the
+    engine repo's `scripts` has no `__init__.py`, so it is only a namespace portion
+    and always loses to v4's regular `scripts` package. Conversely v4's `runtime/`
+    is a bare data directory, so `import runtime` resolves to the engine repo's
+    regular package regardless of ordering. Nothing in v4 imports these names.
+
+    Finally, note that the engine repo's `mri_agent_shell.bootstrap
+    .ensure_import_paths()` inserts the repo root *and its parent* at position 0 as
+    a side effect of importing `BRIDGE_MODULE`.
+    """
+    root = v3_root if v3_root is not None else resolve_v3_root()
+    if root is None:
         return None
-    import_root = str(v3_root.parent.resolve())
+    import_root = str(Path(root).resolve())
     if import_root not in sys.path:
         sys.path.insert(0, import_root)
     return import_root
 
 
+def reset_v3_root_cache() -> None:
+    """Forget the resolved repo root and the imported module (for tests)."""
+    resolve_v3_root.cache_clear()
+    _load_v3_tool_registry_module.cache_clear()
+
+
 @lru_cache(maxsize=1)
 def _load_v3_tool_registry_module() -> Tuple[Optional[Any], Optional[str], Optional[str]]:
     v3_root = resolve_v3_root()
-    import_root = _ensure_import_root(v3_root)
+    import_root = ensure_import_root(v3_root)
     if v3_root is None:
-        return None, import_root, f"v3 repo '{DEFAULT_V3_REPO_NAME}' not found"
+        configured = [name for name in V3_ROOT_ENV_VARS if str(os.environ.get(name) or "").strip()]
+        hint = (
+            f"checked {', '.join(f'{name}={os.environ[name]}' for name in configured)}"
+            if configured
+            else f"set {V3_ROOT_ENV_VARS[0]} to the {DEFAULT_V3_REPO_NAME} checkout"
+        )
+        return None, import_root, f"engine repo '{DEFAULT_V3_REPO_NAME}' not found ({hint})"
 
     try:
         module = importlib.import_module(BRIDGE_MODULE)
@@ -229,7 +323,8 @@ def discover_capabilities(*, dry_run: bool = False, include_core: bool | None = 
 
 def bridge_health(*, dry_run: bool = False, include_core: bool | None = None) -> Dict[str, Any]:
     v3_root = resolve_v3_root()
-    import_root = str(v3_root.parent.resolve()) if v3_root is not None else None
+    # The import root IS the repo root for the top-level-absolute-import layout.
+    import_root = str(v3_root.resolve()) if v3_root is not None else None
     warnings: List[str] = []
 
     module, _, import_error = _load_v3_tool_registry_module()

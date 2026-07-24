@@ -22,6 +22,7 @@ from packages.schemas import (
     create_mock_session,
 )
 from packages.tools import resolve_demo_case, resolve_tool_runtime_profile, run_v3_tool
+from packages.tools.compiler_metadata import DEFAULT_TOOL_CONTRACTS
 
 from .artifacts import ArtifactWriter, ArtifactWriteResult, make_node_artifact_dir
 
@@ -141,21 +142,120 @@ def _downstream_node_ids(graph: ActionGraph, start_node_id: str) -> List[str]:
     return ordered
 
 
+# ---------------------------------------------------------------------------
+# Executor tool contract table.
+#
+# This is deliberately a STATIC table rather than something derived from the v3
+# tool registry at import time: importing the BCER/v3 stack here would pull the
+# heavy imaging dependencies into every process that touches the executor (and
+# into the unit tests, which monkeypatch ``run_v3_tool`` precisely so they never
+# need it).  Keep this table as the single obvious place where per-tool executor
+# expectations live.
+#
+# ``required_output_paths`` is transcribed from the v3 ``ToolSpec.output_schema``
+# ``required`` lists in the BCER repo (``tools/*.py``), restricted to the entries
+# that are filesystem paths the executor can stat.  Where the v4 executor is
+# deliberately stricter than the v3 schema (identify_sequences, segment_prostate,
+# generate_report) the stricter v4 list is kept and flagged below.
+#
+# NOTE: ``packages/tools/compiler_metadata.py`` also carries ``produced_outputs``
+# for all 11 tools, but two of its entries do not match the real v3 tools
+# (``detect_lesion_candidates`` -> ``lesion_candidates_path`` and
+# ``brats_mri_segmentation`` -> ``segmentation_path``); the real tools emit
+# ``candidates_path`` and ``seg_path``/``tumor_subregions_path``.  compiler_metadata
+# is therefore used only for tool identity / capability lookups here, not for
+# contract validation.
+# ---------------------------------------------------------------------------
+_TOOL_EXECUTION_CONTRACTS: Dict[str, Dict[str, Any]] = {
+    "identify_sequences": {
+        # v3 requires only ``mapping``; v4 additionally insists on the index files.
+        "stage": "identify",
+        "required_output_paths": ("series_inventory_path", "dicom_meta_path", "dicom_headers_index_path"),
+    },
+    "register_to_reference": {
+        "stage": "register",
+        "required_output_paths": ("resampled_path", "transform_path"),
+    },
+    "segment_prostate": {
+        # v3 requires only ``prostate_mask_path``; v4 additionally insists on zone/input.
+        "stage": "segment",
+        "required_output_paths": ("prostate_mask_path", "zone_mask_path", "t2w_input_path"),
+    },
+    "detect_lesion_candidates": {
+        # v3 ToolSpec.output_schema is empty for this tool; ``candidates_path`` is the
+        # one path emitted by both the primary and the fallback code paths.
+        "stage": "lesion",
+        "required_output_paths": ("candidates_path",),
+    },
+    "extract_roi_features": {
+        "stage": "extract",
+        "required_output_paths": ("feature_table_path", "slice_summary_path"),
+    },
+    "package_vlm_evidence": {
+        "stage": "vlm",
+        "required_output_paths": ("vlm_evidence_path",),
+    },
+    "generate_report": {
+        # v3 requires report_txt_path/report_json_path/vlm_evidence_bundle_path; v4
+        # validates the two artifacts it actually renders and cross-checks.
+        "stage": "report",
+        "required_output_paths": ("report_json_path", "clinical_report_path"),
+    },
+    "brats_mri_segmentation": {
+        "stage": "segment",
+        "required_output_paths": ("seg_path", "tumor_subregions_path"),
+    },
+    "classify_brain_glioma_grade": {
+        "stage": "classify",
+        "required_output_paths": ("classification_path",),
+    },
+    "segment_cardiac_cine": {
+        "stage": "segment",
+        "required_output_paths": ("seg_path",),
+    },
+    "classify_cardiac_cine_disease": {
+        "stage": "classify",
+        "required_output_paths": ("classification_path",),
+    },
+}
+
 _TOOL_STAGE_MAP: Dict[str, str] = {
-    "identify_sequences": "identify",
-    "register_to_reference": "register",
-    "segment_prostate": "segment",
-    "package_vlm_evidence": "vlm",
-    "generate_report": "report",
+    tool_name: str(contract.get("stage") or "misc") for tool_name, contract in _TOOL_EXECUTION_CONTRACTS.items()
 }
 
 _TOOL_REQUIRED_OUTPUT_PATHS: Dict[str, Tuple[str, ...]] = {
-    "identify_sequences": ("series_inventory_path", "dicom_meta_path", "dicom_headers_index_path"),
-    "register_to_reference": ("resampled_path", "transform_path"),
-    "segment_prostate": ("prostate_mask_path", "zone_mask_path", "t2w_input_path"),
-    "package_vlm_evidence": ("vlm_evidence_path",),
-    "generate_report": ("report_json_path", "clinical_report_path"),
+    tool_name: tuple(contract.get("required_output_paths") or ())
+    for tool_name, contract in _TOOL_EXECUTION_CONTRACTS.items()
 }
+
+# Every name the planner/compiler can legitimately put on a node and call a "tool".
+# Derived from the compiler metadata so a new blueprint cannot silently bypass the
+# "did the executor actually run something?" guard.
+_KNOWN_TOOL_NAMES: frozenset = frozenset(_TOOL_EXECUTION_CONTRACTS) | frozenset(DEFAULT_TOOL_CONTRACTS)
+
+# Tools that produce a segmentation, derived from compiler metadata capabilities
+# rather than hard-coding ``segment_prostate``.
+_SEGMENTATION_TOOL_NAMES: frozenset = frozenset(
+    tool_name
+    for tool_name, contract in DEFAULT_TOOL_CONTRACTS.items()
+    if "segment" in [str(cap) for cap in (contract.get("capabilities") or [])]
+)
+
+
+def _node_tool_identity(node: ActionNode) -> str:
+    """Return the tool this node claims to run, or "" if it is not a tool node.
+
+    A node counts as a tool node when it carries an explicit ``tool_name`` or when
+    its free-form ``action_type`` matches a name the compiler/registry knows about.
+    Presentational nodes (``read_case``, ``review_checkpoint``, ...) return "".
+    """
+    tool_name = str(getattr(node, "tool_name", "") or "").strip()
+    if tool_name:
+        return tool_name
+    action_type = str(getattr(node, "action_type", "") or "").strip()
+    if action_type in _KNOWN_TOOL_NAMES:
+        return action_type
+    return ""
 
 
 def _runtime_profile_label(tool_name: str) -> str:
@@ -176,6 +276,17 @@ class ExecutionOutcome:
 
 class ContractValidationError(RuntimeError):
     pass
+
+
+class MissingExecutorHandlerError(RuntimeError):
+    """Raised when a node names a real tool that the executor cannot actually run.
+
+    Previously such nodes fell through to ``_exec_generic_tool``, which wrote a
+    placeholder JSON/TXT/SVG bundle and reported ``succeeded`` without calling any
+    tool and without contract validation.  A brain or cardiac graph therefore
+    rendered "N/N done, all green" having executed nothing.  Failing loudly here is
+    the only honest answer until the missing handlers exist.
+    """
 
 
 class MockExecutorStore:
@@ -429,19 +540,38 @@ class MockExecutorStore:
             except Exception as exc:
                 raise ContractValidationError(f"report_json_path is unreadable: {report_path} ({exc})") from exc
             lesion_meta = _ensure_dict(report_payload.get("lesion_assessment_meta"))
-            segment_node = next((node for node in self._session.graph.nodes if str(node.node_id) == "segment_prostate"), None)
-            if segment_node is not None and str(segment_node.status) == "succeeded":
+            succeeded_segmentation_nodes = self._succeeded_segmentation_node_ids()
+            if succeeded_segmentation_nodes:
                 seg_usable = lesion_meta.get("segmentation_usable")
                 validation["report_segmentation_usable"] = seg_usable
+                validation["succeeded_segmentation_nodes"] = succeeded_segmentation_nodes
                 if seg_usable is False:
+                    joined = ", ".join(succeeded_segmentation_nodes)
                     raise ContractValidationError(
-                        "generate_report produced downstream contradiction: segment_prostate succeeded but report says segmentation_usable=false"
+                        "generate_report produced downstream contradiction: "
+                        f"{joined} succeeded but report says segmentation_usable=false"
                     )
 
         if missing_paths:
             details = ", ".join(f"{item['key']} -> {item['path'] or '<missing>'}" for item in missing_paths)
             raise ContractValidationError(f"{tool_name} missing required output paths: {details}")
         return validation
+
+    def _succeeded_segmentation_node_ids(self) -> List[str]:
+        """Node ids of every succeeded segmentation node, for any domain.
+
+        Replaces a hard-coded lookup of the literal node id ``segment_prostate``;
+        the segmentation tool set is derived from compiler metadata capabilities so
+        brain (``brats_mri_segmentation``) and cardiac (``segment_cardiac_cine``)
+        graphs are covered too.
+        """
+        out: List[str] = []
+        for node in self._session.graph.nodes:
+            if str(node.status) != "succeeded":
+                continue
+            if _node_tool_identity(node) in _SEGMENTATION_TOOL_NAMES:
+                out.append(str(node.node_id))
+        return out
 
     def _record_runtime_tool_result(
         self,
@@ -919,6 +1049,8 @@ class MockExecutorStore:
         except Exception as exc:
             message = str(exc).strip() or f"{node.action_type} failed"
             node.status = "failed"
+            # Surface the reason on the node itself so the inspector can render it.
+            node.notes = message
             self._session.case_state.last_error = message
             if node.tool_name:
                 self._record_runtime_tool_result(
@@ -990,6 +1122,8 @@ class MockExecutorStore:
         except Exception as exc:
             message = str(exc).strip() or f"{node.action_type} failed"
             node.status = "failed"
+            # Surface the reason on the node itself so the inspector can render it.
+            node.notes = message
             self._session.case_state.last_error = message
             if node.tool_name:
                 self._record_runtime_tool_result(
@@ -1051,10 +1185,25 @@ class MockExecutorStore:
             "package_vlm_evidence": self._exec_package_vlm_evidence,
             "generate_report": self._exec_generate_report,
         }
-        handler = handlers.get(str(node.action_type))
-        if handler is None:
-            return self._exec_generic_tool(node)
-        return handler(node)
+        handler = handlers.get(str(node.action_type)) or handlers.get(str(node.tool_name or ""))
+        if handler is not None:
+            return handler(node)
+
+        tool_name = _node_tool_identity(node)
+        if tool_name:
+            raise MissingExecutorHandlerError(
+                f"no executor handler for tool {tool_name} (node {node.node_id}); "
+                "the planner can compile this tool but the v4 executor cannot run it yet, "
+                "so no placeholder result will be reported as success"
+            )
+        if str(node.kind) == "tool":
+            raise MissingExecutorHandlerError(
+                f"no executor handler for tool node {node.node_id} (action_type={node.action_type!r}); "
+                "tool nodes must resolve to a real tool call"
+            )
+        # Non-tool / presentational nodes (read_case, review_checkpoint, merge, ...)
+        # legitimately have no tool to run; they still get a placeholder bundle.
+        return self._exec_non_tool_node(node)
 
     def _artifact_ref(
         self,
@@ -1168,10 +1317,16 @@ class MockExecutorStore:
         return artifacts
 
     def _exec_identify_sequences(self, node: ActionNode) -> ExecutionOutcome:
+        # There is no configured "mock mode" anywhere in this codebase, so a failure to
+        # reach the real v3 tool must surface as a failure -- never as a fabricated
+        # sequence index. Mirrors _exec_generate_report.
         real_outcome = self._exec_identify_sequences_v3(node)
-        if real_outcome is not None:
-            return real_outcome
-        return self._exec_identify_sequences_mock(node)
+        if real_outcome is None:
+            raise RuntimeError(
+                "identify_sequences could not run: no readable case input_root and no demo case "
+                f"for domain {self._session.case_state.domain!r}"
+            )
+        return real_outcome
 
     def _exec_identify_sequences_v3(self, node: ActionNode) -> Optional[ExecutionOutcome]:
         case_state = self._session.case_state
@@ -1272,72 +1427,6 @@ class MockExecutorStore:
             [a.artifact_id for a in artifacts],
             [],
         )
-
-    def _exec_identify_sequences_mock(self, node: ActionNode) -> ExecutionOutcome:
-        case_state = self._session.case_state
-        node_dir = make_node_artifact_dir(graph_id=self._session.graph.graph_id, step_index=self._step_count + 1, node_id=node.node_id)
-        self._step_count += 1
-        payload = {
-            "case_id": case_state.case_id,
-            "domain": case_state.domain,
-            "input_root": case_state.input_root,
-            "available_modalities": list(case_state.available_modalities),
-            "sequence_index": {
-                "T2w": _artifact_rel_path(case_state.case_id, "T2w.nii.gz"),
-                "ADC": _artifact_rel_path(case_state.case_id, "ADC.nii.gz"),
-                "DWI_highb": _artifact_rel_path(case_state.case_id, "DWI_highb.nii.gz"),
-            },
-            "notes": "Mock DICOM inventory derived from the deterministic executor.",
-        }
-        artifacts = self._write_step_bundle(
-            node=node,
-            title="Sequence Inventory",
-            node_dir=node_dir,
-            json_name="sequence_inventory.json",
-            txt_name="sequence_inventory.txt",
-            svg_name="sequence_inventory.svg",
-            json_payload=payload,
-            txt_payload=_join_lines(
-                "Sequence inventory completed.",
-                f"Case: {case_state.case_id}",
-                "Modalities: T2w, ADC, DWI_highb",
-                "Status: ready for registration",
-            ),
-            svg_lines=[
-                f"Case {case_state.case_id}",
-                "Detected modalities: T2w, ADC, DWI_highb",
-                "Next: register ADC to T2w",
-            ],
-            svg_accent="#7b4f2c",
-            metadata={"modalities": list(case_state.available_modalities), "source": "mock"},
-        )
-        case_state.sequence_index = {
-            "T2w": _artifact_rel_path(case_state.case_id, "T2w.nii.gz"),
-            "ADC": _artifact_rel_path(case_state.case_id, "ADC.nii.gz"),
-            "DWI_highb": _artifact_rel_path(case_state.case_id, "DWI_highb.nii.gz"),
-        }
-        case_state.available_modalities = ["T2w", "ADC", "DWI_highb"]
-        node.outputs = {
-            "mapping": payload["sequence_index"],
-            "series_inventory_path": artifacts[0].uri if artifacts else "",
-            "dicom_headers_index_path": artifacts[0].uri if artifacts else "",
-            "note": "Deterministic mock sequence inventory",
-            "execution_mode": "mock",
-            "runtime_profile": _runtime_profile_label("identify_sequences"),
-        }
-        validation = self._validate_tool_result_contract("identify_sequences", node.outputs)
-        self._record_runtime_tool_result(
-            tool_name="identify_sequences",
-            ok=True,
-            data=node.outputs,
-            generated_artifacts=self._artifact_dicts_from_v4_refs(artifacts),
-            consumable=validation["consumable"],
-            validation=validation,
-            attempt_id=node.current_attempt_id,
-            rerun_from=node.rerun_from,
-            supersedes=node.supersedes,
-        )
-        return ExecutionOutcome(node.node_id, "succeeded", "Sequence inventory generated", [a.artifact_id for a in artifacts], [])
 
     def _exec_register_to_reference(self, node: ActionNode) -> ExecutionOutcome:
         graph = self._session.graph
@@ -1688,16 +1777,24 @@ class MockExecutorStore:
         )
         return ExecutionOutcome(node.node_id, "succeeded", "Report drafted", [a.artifact_id for a in artifacts], [])
 
-    def _exec_generic_tool(self, node: ActionNode) -> ExecutionOutcome:
+    def _exec_non_tool_node(self, node: ActionNode) -> ExecutionOutcome:
+        """Placeholder bundle for nodes that are not tool calls.
+
+        Only reachable for presentational/control nodes (``read_case``,
+        ``review_checkpoint``, merges, ...).  Nodes that name a real tool are
+        rejected in ``_simulate_node_execution`` instead of landing here.
+        """
         graph = self._session.graph
         case_state = self._session.case_state
         node_dir = make_node_artifact_dir(graph_id=graph.graph_id, step_index=self._step_count + 1, node_id=node.node_id)
         self._step_count += 1
         payload = {
             "action_type": node.action_type,
+            "kind": str(node.kind),
             "inputs": dict(node.inputs or {}),
             "outputs": dict(node.outputs or {}),
             "status": "completed",
+            "tool_executed": False,
         }
         artifacts = self._write_step_bundle(
             node=node,
@@ -1707,17 +1804,30 @@ class MockExecutorStore:
             txt_name=f"{node.node_id}.txt",
             svg_name=f"{node.node_id}.svg",
             json_payload=payload,
-            txt_payload=_join_lines(f"Mock execution for {node.action_type}", "No specialized handler available."),
-            svg_lines=[node.title, "Generic tool execution", "Status: completed"],
-            metadata={"action_type": node.action_type},
+            txt_payload=_join_lines(
+                f"Non-tool node {node.node_id} ({node.action_type}) completed.",
+                "No tool was executed for this node.",
+            ),
+            svg_lines=[node.title, "Non-tool node", "Status: completed (no tool executed)"],
+            metadata={"action_type": node.action_type, "tool_executed": False},
         )
         node.outputs = {
             "result": "completed",
+            "tool_executed": False,
             "output_dir": _artifact_rel_path(case_state.case_id, node.node_id),
         }
         self._session.case_state.selected_artifacts = [artifact.artifact_id for artifact in artifacts]
         self._session.case_state.active_node_id = node.node_id
-        return ExecutionOutcome(node.node_id, "succeeded", "Generic tool completed", [a.artifact_id for a in artifacts], [])
+        return ExecutionOutcome(
+            node.node_id,
+            "succeeded",
+            "Non-tool node completed (no tool executed)",
+            [a.artifact_id for a in artifacts],
+            [],
+        )
+
+    # Backwards-compatible alias; the old name implied a tool ran, which it never did.
+    _exec_generic_tool = _exec_non_tool_node
 
     def _apply_patch_operations(self, graph: ActionGraph, operations: Sequence[PatchOperation]) -> None:
         for operation in operations:

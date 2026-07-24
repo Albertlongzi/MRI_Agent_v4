@@ -1,3 +1,8 @@
 pydantic>=2,<3
 fastapi>=0.110,<1
 uvicorn>=0.27,<1
+# Required by the BCER_open tool bridge: build_shell_registry(include_core=True)
+# imports agent.loop -> commands.dispatcher -> commands.tool_runtime, which needs
+# PyYAML, and the tool-runtime config is validated with jsonschema.
+PyYAML>=6.0
+jsonschema>=4.0

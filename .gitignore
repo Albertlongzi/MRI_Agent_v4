@@ -13,6 +13,16 @@ venv/
 *.log
 tmp/
 artifacts/
+# Per-run graph workspaces and the durable session DB. Anchored to the repo
+# root on purpose: a bare "state/" would also shadow the packages/state
+# Python package.
+/runtime/
+/state/
+
+# SQLite session store (plus its WAL/shared-memory sidecars)
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
 
 # OS/editor noise
 .DS_Store
