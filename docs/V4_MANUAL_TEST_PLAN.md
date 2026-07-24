@@ -1,6 +1,7 @@
 # V4 Manual Test Plan
 
 Last updated: 2026-03-20
+Revised: 2026-07-24 — §2 gained a scope note on which pipelines the executor can actually run.
 
 This document is meant to be used for hands-on manual testing.
 
@@ -64,6 +65,14 @@ What to look for:
 Verdict:
 
 - If all of these hold, the most important loop — the one that shows the pipeline is doing real work end to end — is in place
+
+Scope note — stay inside the executable tool set:
+
+The suggested chat message above is chosen so the compiled graph uses only tools the executor can actually run: `identify_sequences`, `register_to_reference`, `segment_prostate`, `package_vlm_evidence`, `generate_report`.
+
+Compiler-reachable tools that have no executor handler raise `MissingExecutorHandlerError` rather than returning a placeholder success. As of 2026-07-24 that set is `detect_lesion_candidates`, `extract_roi_features`, `brats_mri_segmentation`, `classify_brain_glioma_grade` — so the prostate lesion/ROI chain and the brain chain are not yet runnable end to end. The handler list is being actively extended; re-derive the current set with the snippet in `V4_OPEN_ISSUES.md` §4.1 before you plan a round.
+
+So a prostate message that also mentions lesions, ROI features, or radiomics, and any brain request, will compile to a graph that stops at the first unimplemented node with `graph_status=failed`. That is the correct behavior, not a regression — see `V4_OPEN_ISSUES.md` §4.1. Do not treat it as a Round One failure.
 
 ## 3. Round Two: Patch / Review / Continue
 

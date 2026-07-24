@@ -1,5 +1,7 @@
 # V4 Action Graph Schema
 
+Revised: 2026-07-24 — §4 `ActionNode` field list reconciled with `packages/schemas/models.py`.
+
 This document defines the core intermediate representation for `MRI_Agent_v4`.
 The goal is to preserve BCER's deterministic execution discipline while moving
 from template-anchored planning to capability-anchored, natural-language-driven
@@ -80,8 +82,19 @@ Minimum fields:
 - `artifact_refs`: links to produced or consumed artifacts
 - `owner`: `supervisor`, `specialist:<name>`, `human`, or `executor`
 - `editable`: boolean
-- `retry_policy`: optional policy object
 - `notes`: optional planner or human notes
+
+Retry / rerun provenance, added by the recovery work and present in every serialized node:
+
+- `attempt_count`: integer, defaults to `0`
+- `current_attempt_id`: optional attempt id
+- `rerun_from`: optional node id this attempt was re-run from
+- `supersedes`: optional attempt id this attempt replaces
+- `attempt_history`: list of attempt records, defaults to `[]`
+
+See `V4_EXECUTOR_RECOVERY.md` for the semantics of these five fields.
+
+Not implemented: `retry_policy` was specified here in the original design but was never added to `ActionNode` in `packages/schemas/models.py`. Because `V4BaseModel` sets `extra="forbid"`, passing a `retry_policy` key raises a pydantic `ValidationError` rather than being ignored. Bounded retry is still operator-driven; see `V4_OPEN_ISSUES.md` §1.2.
 
 Node rules:
 

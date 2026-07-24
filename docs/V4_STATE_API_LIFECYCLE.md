@@ -1,6 +1,7 @@
 # V4 State / API Lifecycle
 
 Audit date: 2026-03-20
+Revised: 2026-07-24 — §4 now records the graph/patch approval asymmetry.
 
 This document freezes the current minimal durable state, session registration, event stream, and reset/recovery semantics of `MRI_Agent_v4`.
 
@@ -143,10 +144,19 @@ The current minimal wiring rules for `POST /api/chat`:
 - `planner.mode="patch"`:
   - prefer the typed `patch` returned by the planner
   - persist it as a proposal into the graph and into SQLite
-- only when the planner does not supply a typed patch:
+- only when the planner does not supply a typed patch, and only when `graph.proposals` is currently empty:
   - fall back to the older heuristic `preview_patch(reason=...)`
 
 This guarantees that the API no longer leaves planner proposals sitting in the response only.
+
+The two paths are not symmetric, and the difference matters operationally:
+
+- the `graph` path writes straight through. `STORE.replace_graph(...)` makes the planner's graph the active graph during the chat turn itself. Nothing is added to `graph.proposals`, and there is no accept, reject, or undo endpoint for it.
+- the `patch` path is gated. `STORE.stage_patch(...)` only appends to `graph.proposals`; the change takes effect only on `POST /api/proposals/apply-latest`.
+
+So `POST /api/proposals/apply-latest` gates patches only. A single chat message that the planner routes to `mode="graph"` replaces the operator's current graph with no human confirmation. Two further details of `replace_graph`: it forces the incoming graph's `case_id` and `domain` to the active session's values, so a `brain` graph compiled against a session registered as `prostate` is stored with `domain="prostate"`; and if it raises, `/api/chat` swallows the failure into `planner.warnings` as `graph_stage_failed: ...` and still returns 200.
+
+See `V4_PLANNER_OUTPUT_CONTRACT.md` §7.
 
 ## 5. Stable API Surface
 
@@ -212,10 +222,13 @@ curl -N http://127.0.0.1:8008/api/events/stream
 
 ### 7.3 GPU Path
 
-The current runtime profile for `segment_prostate`:
+The current runtime profile for `segment_prostate`, as returned by `GET /api/runtime/tools/segment_prostate`:
 
-- `profile_id=cp082-qwen-vllm`
-- `launcher=ssh`
-- `ssh_host=<gpu-node>`
+- `profile_id=apptainer-medgemma`
+- `launcher=apptainer`
+- `ssh_host=${MRI_AGENT_V4_GPU_HOST}`
+- `gpu=true`
 
-The control plane can therefore initiate execution from a submit node with no GPU, while the GPU step is forwarded to `<gpu-node>`.
+`cp082-qwen-vllm` remains defined as the non-container SSH fallback, but it is no longer what `segment_prostate` resolves to. See `V4_TOOL_RUNTIME_STRATEGY.md` for the full mapping.
+
+The control plane can therefore initiate execution from a submit node with no GPU, while the GPU step is forwarded to the configured GPU host.

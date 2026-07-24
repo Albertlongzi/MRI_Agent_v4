@@ -1,6 +1,7 @@
 # V4 Open Issues
 
 Last updated: 2026-03-20
+Revised: 2026-07-24 — §1 through §3 left as written; see the §4 addendum.
 
 This document records only the problems in `MRI_Agent_v4` that are not yet fully solved.
 
@@ -36,6 +37,8 @@ Not yet fully solved:
 - the executor has no typed bounded retry / retry budget
 
 ### 1.3 The prostate lesion / ROI chain still has a "fake completion" problem
+
+> Status update 2026-07-24: the false-success half of this issue is fixed. The text below is kept unchanged as the point-in-time record; see the addendum in §4 for what changed and what is still open.
 
 The graph layer can already orchestrate this correctly:
 
@@ -133,3 +136,41 @@ Judged as a complete v4 workstation:
 
 - it is still `strong MVP / pre-release`
 - it should not yet claim that all of its capabilities are productized
+
+## 4. Addendum
+
+### 4.1 2026-07-24 — the "fake completion" path in §1.3 is fixed
+
+Sections 1 through 3 above are left as written, as the point-in-time record. This addendum records one change on top of them.
+
+`MockExecutorStore._simulate_node_execution` in `packages/executor/store.py` used to fall through to a generic handler for any tool it had no real implementation for. That handler wrote placeholder `json/txt/svg` artifacts and returned `succeeded`. That fall-through is gone. A node that resolves to a tool identity with no registered handler now raises `MissingExecutorHandlerError`, and a node with `kind="tool"` that resolves to no tool identity at all raises as well.
+
+The authoritative handler list is the `handlers` dict at the top of `MockExecutorStore._simulate_node_execution`. It is being actively extended, so treat the snapshot below as dated rather than fixed, and re-derive it before relying on it:
+
+```bash
+python -c "
+import inspect, re
+from packages.tools.compiler_metadata import DOMAIN_RULEBOOK
+from packages.executor.store import MockExecutorStore
+reachable = sorted({t for rb in DOMAIN_RULEBOOK.values() for t in rb['tool_order']})
+handled = set(re.findall(r'\"(\w+)\":\s*self\._exec_', inspect.getsource(MockExecutorStore._simulate_node_execution)))
+print([t for t in reachable if t not in handled])
+"
+```
+
+Snapshot as of 2026-07-24. Handlers that exist: `identify_sequences`, `register_to_reference`, `segment_prostate`, `segment_cardiac_cine`, `classify_cardiac_cine_disease`, `generate_qa_snapshot`, `package_vlm_evidence`, `generate_report`.
+
+Compiler-reachable tools with no handler, which therefore raise: `detect_lesion_candidates`, `extract_roi_features`, `brats_mri_segmentation`, `classify_brain_glioma_grade`. In other words the prostate lesion/ROI chain and the whole brain chain are still unrunnable; the cardiac chain has since gained handlers.
+
+Non-tool nodes are unaffected. Presentational nodes such as `read_case` and `review_checkpoint` legitimately have nothing to call and keep their placeholder bundle.
+
+**The consequence is flipped.** Previously, a graph containing these nodes ran to "8/8 done", all green, with the damage only visible downstream as `ROI features unavailable` or `Lesion tool status: not_assessable` buried inside the report. Now the same graph fails loudly: the node goes to `failed`, the reason lands on `node.notes` and in `case_state.last_error`, the run is recorded in `stage_outputs` with `ok=false` and `consumable=false`, `execute_until_done` stops and reports `graph.status="failed"`, and no artifacts are emitted. A red run that stops at the first unimplemented tool is the correct signal; the previous green run was not.
+
+What this does **not** fix — the rest of §1.3 stands unchanged:
+
+- `detect_lesion_candidates` still does not emit a real `candidates_path` / `lesion_mask_path`
+- `extract_roi_features` still does not emit a real `feature_table_path`
+- the brain and cardiac pipelines the compiler can plan still cannot be executed end to end
+- the bar for calling §1.3 closed is still the four-point list in that section
+
+In other words, the problem moved from "silently wrong" to "honestly blocked". The missing tool handlers are still missing.

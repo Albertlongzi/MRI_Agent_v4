@@ -21,6 +21,7 @@ Core design:
 Core implementation contracts:
 
 - `V4_INTENT_SPEC.md`
+- `V4_COMPILER_LAYER.md`
 - `V4_PLANNER_OUTPUT_CONTRACT.md`
 - `V4_EXECUTOR_STAGE_DATA_CONTRACT.md`
 - `V4_EXECUTOR_RECOVERY.md`

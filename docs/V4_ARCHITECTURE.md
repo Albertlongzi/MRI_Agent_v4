@@ -132,6 +132,8 @@ A typical request should move through the system as follows:
 
 This flow keeps the plan visible and editable without sacrificing deterministic execution.
 
+Implementation status as of 2026-07-24: step 4 is only half-built. Patches do go through the approve step — the planner stages them into `graph.proposals` and they land only on `POST /api/proposals/apply-latest`. Graph proposals do not: `POST /api/chat` calls `STORE.replace_graph(...)` inline, so a `mode="graph"` turn replaces the active graph with no approval and no undo. This section describes the target design, not current behavior. See `V4_PLANNER_OUTPUT_CONTRACT.md` §7.
+
 ## 5. Action Graph Model
 
 `v4` should center the system on a first-class `ActionGraph`.

@@ -1,5 +1,7 @@
 # V4 Frontend Handoff
 
+Revised: 2026-07-24 — §4 route list, §6 `ActionNode`, and §7.4 `planner` shape corrected against `apps/api/main.py` and `packages/schemas/models.py`; §7.9–§7.11 added.
+
 This document describes the frontend's contract with the backend, so that the frontend can be developed independently. The goal is not to keep building on the current static page, but to hand over the `MRI_Agent_v4` backend API surface, its data models, and the entry points of the existing frontend code in one place, so the UI can be rewritten from scratch.
 
 ## 1. Current frontend code
@@ -88,11 +90,20 @@ Used for:
 - `GET /api/session`
 - `GET /api/graph`
 - `GET /api/events`
+- `GET /api/events/stream` — Server-Sent Events (`text/event-stream`)
+- `POST /api/session`
+- `POST /api/cases/register` — alias; it calls the same handler as `POST /api/session`
 
 Used for:
 
 - initializing the page's main state
 - refreshing the graph, chat, artifacts, and event timeline
+- live-tailing the event timeline over SSE instead of re-fetching `GET /api/events`
+- registering a non-demo case as the active session
+
+Both `GET /api/events` and `GET /api/events/stream` accept `after_event_id` and only return events for the currently active graph. `GET /api/events/stream` also accepts `poll_interval` (seconds, `0.1`–`5.0`, default `0.5`).
+
+See `V4_STATE_API_LIFECYCLE.md` for the session registration body and the SSE frame semantics.
 
 ### Chat / Patch / Execute
 
@@ -101,6 +112,7 @@ Used for:
 - `POST /api/proposals/apply-latest`
 - `POST /api/execute/next`
 - `POST /api/execute/until-done`
+- `POST /api/execute/rerun-from-node`
 - `POST /api/reset`
 
 Used for:
@@ -109,6 +121,7 @@ Used for:
 - inserting a human review checkpoint
 - applying a proposal
 - single-step execution / full-pipeline execution
+- re-running from a chosen node and invalidating everything downstream of it
 - reset session
 
 ### Tool / Runtime Metadata
@@ -190,6 +203,13 @@ export interface ActionNode {
   owner: string;
   editable: boolean;
   notes?: string | null;
+  // Retry / rerun provenance. These are always present in the JSON
+  // (`attempt_count` defaults to 0, `attempt_history` to []).
+  attempt_count: number;
+  current_attempt_id?: string | null;
+  rerun_from?: string | null;
+  supersedes?: string | null;
+  attempt_history: Array<Record<string, unknown>>;
 }
 
 export interface ActionEdge {
@@ -302,20 +322,78 @@ Key response fields:
   "event": {},
   "graph": {},
   "session": {},
-  "planner": {
-    "mode": "llm | llm_filtered | error | disabled",
-    "patch_reason": null
-  },
+  "planner": {},
   "patch": {},
   "proposal_count": 1
 }
 ```
+
+`reply`, `chat_history`, `event`, `graph`, and `session` are always present. `patch` and `proposal_count` appear only when a proposal was staged or previewed on this turn.
+
+#### The `planner` field
+
+`response.planner` is **not** a two-key summary. The API assigns the entire dict returned by `BrainService.reply(...)` to it, so it carries the full planner contract described in `V4_PLANNER_OUTPUT_CONTRACT.md`:
+
+```json
+{
+  "planner": {
+    "mode": "graph | patch | reply",
+    "intent_spec": {},
+    "reply": { "role": "assistant", "content": "..." },
+    "graph": null,
+    "patch": null,
+    "warnings": [],
+    "planner_metadata": {
+      "intent": "graph_domain_workup",
+      "source": "heuristic | llm | hybrid",
+      "llm_status": "llm | heuristic | disabled | error | llm_filtered | not_used",
+      "model": null,
+      "base_url": null,
+      "latency_ms": null,
+      "validation_passed": true,
+      "validation_errors": [],
+      "fallback_used": false,
+      "extras": {}
+    },
+    "patch_reason": null
+  }
+}
+```
+
+Notes on `planner.mode`:
+
+- the real values are `graph`, `patch`, and `reply` — these come from the `PlannerMode` literal in `packages/planner/contracts.py`
+- `llm`, `llm_filtered`, `heuristic`, `disabled`, `error`, and `not_used` are **not** `mode` values; they live one level down in `planner.planner_metadata.llm_status`
+- `error` is the one extra `mode` value the API itself can produce: if `BrainService.reply(...)` raises, `apps/api/main.py` substitutes a much smaller dict with only `{"mode": "error", "error": "<message>", "reply": null, "patch_reason": "..."}`, so a frontend must not assume `planner.planner_metadata` exists
+- the string `mock` never appears in `planner.mode`. It is a fallback for the chat event's `reply_source` only, and surfaces at `response.event.payload.reply_source`
+
+Notes on duplication:
+
+- `planner.graph` is populated only when `mode="graph"`; it is the same graph the API just wrote into the active session, so it duplicates top-level `response.graph`
+- `planner.patch` is populated only when `mode="patch"`; top-level `response.patch` is the staged proposal derived from it
+- `response.event.payload.reply_metadata` is another copy of `planner`, minus the `reply` key
 
 Notes for the frontend:
 
 - prefer overwriting local state with `response.session` and `response.graph`
 - treat `response.reply` as a display-only fallback
 - when `response.patch` is present, the Brain or a heuristic has raised a new proposal
+- read `planner.mode` to decide what actually happened, and read `planner.planner_metadata.llm_status` to render Brain health
+- **`mode="graph"` has already replaced the active graph by the time the response is returned** — see §7.4.1
+
+#### 7.4.1 Graph proposals are applied without a human gate
+
+Graph and patch results are wired asymmetrically in `apps/api/main.py`:
+
+- `mode="graph"` calls `STORE.replace_graph(...)` inline. The planner's graph becomes the active graph on that chat turn, a `graph_replaced` event is appended, and `graph.proposals` stays empty. There is no accept/reject step.
+- `mode="patch"` calls `STORE.stage_patch(...)`. That only appends to `graph.proposals`; the change lands only after `POST /api/proposals/apply-latest`.
+
+So a UI that renders proposals as "pending, awaiting approval" will never see a graph proposal in that state. If a graph turn needs an operator gate, the frontend has to implement it — for example by diffing against the previous `response.graph` and offering an undo — because the backend does not provide one.
+
+Two related behaviors worth knowing:
+
+- if `replace_graph` raises, the failure is swallowed into `planner.warnings` as `graph_stage_failed: ...`, and the response is otherwise a normal 200
+- `replace_graph` overwrites the incoming graph's `case_id` and `domain` with the current session's values. A brain-domain graph compiled while the session is registered as `prostate` will arrive with `planner.graph.domain = "brain"` but `response.graph.domain = "prostate"`.
 
 ### 7.5 `POST /api/patch`
 
@@ -362,10 +440,13 @@ Key response fields:
   "status": "succeeded",
   "message": "...",
   "artifact_ids": [],
+  "event_ids": [],
   "graph": {},
   "session": {}
 }
 ```
+
+`status` is the node's terminal `NodeStatus`. A node whose tool has no executor handler comes back as `failed` with the reason in `message`; it is never reported as `succeeded`.
 
 ### 7.8 `POST /api/reset`
 
@@ -377,6 +458,81 @@ Response:
   "session": {}
 }
 ```
+
+### 7.9 `POST /api/session` and `POST /api/cases/register`
+
+Both routes share one request model and one handler.
+
+Request body:
+
+```json
+{
+  "case_id": "manual_case_001",
+  "input_root": "/tmp/manual_case_001",
+  "domain": "brain",
+  "session_id": "manual-session"
+}
+```
+
+`case_id` and `input_root` are required. `domain` defaults to `prostate`. `session_id` is generated if omitted. Extra fields are rejected.
+
+Response:
+
+```json
+{
+  "status": "registered",
+  "session": {},
+  "graph": {},
+  "events": []
+}
+```
+
+### 7.10 `POST /api/execute/rerun-from-node`
+
+Request body:
+
+```json
+{
+  "node_id": "segment_prostate",
+  "reason": "operator rerun"
+}
+```
+
+`reason` defaults to `"operator rerun"`.
+
+Response:
+
+```json
+{
+  "rerun": true,
+  "node_id": "segment_prostate",
+  "reason": "operator rerun",
+  "affected_nodes": [],
+  "event": {},
+  "graph": {},
+  "session": {}
+}
+```
+
+`affected_nodes` is the target node plus everything downstream that was invalidated. See `V4_EXECUTOR_RECOVERY.md`.
+
+### 7.11 `GET /api/events/stream`
+
+Server-Sent Events. Query parameters: `after_event_id` (optional cursor) and `poll_interval` (seconds, `0.1`–`5.0`, default `0.5`).
+
+The stream emits, in order:
+
+1. one `event: stream_ready` frame with `{"status": "connected", "graph_id": "...", "after_event_id": ...}`
+2. any backlog after the cursor, then new events as they land
+
+Each event frame uses the `GraphEvent.event_type` as the SSE `event:` name, the serialized `GraphEvent` as `data:`, and the `event_id` as the SSE `id:`. While idle the server writes `: keep-alive` comment lines.
+
+```ts
+const es = new EventSource(`${apiBaseUrl}/api/events/stream?after_event_id=${cursor ?? ""}`);
+es.addEventListener("node_finished", (e) => applyEvent(JSON.parse(e.data)));
+```
+
+Because the event name varies per event type, an `onmessage` handler alone will not see these frames — either subscribe per event type or attach listeners for the types listed in `V4_STATE_API_LIFECYCLE.md` §3.2.
 
 ## 8. Artifact URI rules
 
@@ -474,3 +630,5 @@ Get these four things working first:
 - artifact preview
 
 Once those four work, add `patch / apply proposal / runtime profiles` incrementally.
+
+Note on the event timeline: this six-endpoint starter set deliberately omits `GET /api/events`, and the shipped static page in `apps/web/app.js` only fetches `/api/events` once per refresh. That is a starter shortcut, not a recommendation. As soon as the timeline needs to update during execution, use `GET /api/events/stream` (§7.11) rather than re-fetching `/api/events` on a timer.

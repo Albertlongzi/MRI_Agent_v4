@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from copy import deepcopy
 from dataclasses import dataclass
@@ -210,12 +211,22 @@ _TOOL_EXECUTION_CONTRACTS: Dict[str, Dict[str, Any]] = {
         "required_output_paths": ("classification_path",),
     },
     "segment_cardiac_cine": {
+        # v3 requires only ``seg_path``; v4 additionally insists on the three class
+        # masks, because ``classify_cardiac_cine_disease`` and the cardiac report
+        # path both consume RV/MYO/LV separately.  ``_split_cardiac_labels`` in
+        # BCER_open/tools/cardiac_cine_segmentation.py always writes all three.
         "stage": "segment",
-        "required_output_paths": ("seg_path",),
+        "required_output_paths": ("seg_path", "rv_mask_path", "myo_mask_path", "lv_mask_path"),
     },
     "classify_cardiac_cine_disease": {
         "stage": "classify",
         "required_output_paths": ("classification_path",),
+    },
+    "generate_qa_snapshot": {
+        # Not a compiler blueprint tool: the executor calls it itself so the
+        # NIfTI-only cardiac path still puts a viewable PNG in the artifact rail.
+        "stage": "qa",
+        "required_output_paths": ("output_png",),
     },
 }
 
@@ -241,6 +252,19 @@ _SEGMENTATION_TOOL_NAMES: frozenset = frozenset(
     if "segment" in [str(cap) for cap in (contract.get("capabilities") or [])]
 )
 
+# Segmentation tools whose mask the report's ``lesion_assessment_meta`` block is
+# actually *about*.  That block is prostate-lesion specific -- a real cardiac run
+# emits ``segmentation_usable: false`` alongside
+# ``lesion_geometry_note: "missing_lesion_or_prostate_mask"`` -- so cross-checking it
+# against *any* succeeded segmentation node (brain tumour, cardiac cine) turns a
+# perfectly correct cardiac report into a failed node.  Still derived from compiler
+# metadata, and still keyed on the tool rather than the literal node id.
+_LESION_SEGMENTATION_TOOL_NAMES: frozenset = frozenset(
+    tool_name
+    for tool_name, contract in DEFAULT_TOOL_CONTRACTS.items()
+    if "prostate_segmentation" in [str(cap) for cap in (contract.get("capabilities") or [])]
+)
+
 
 def _node_tool_identity(node: ActionNode) -> str:
     """Return the tool this node claims to run, or "" if it is not a tool node.
@@ -263,6 +287,73 @@ def _runtime_profile_label(tool_name: str) -> str:
         return str(resolve_tool_runtime_profile(tool_name).get("profile_id") or "control-plane")
     except Exception:
         return "control-plane"
+
+
+# ---------------------------------------------------------------------------
+# generate_qa_snapshot runtime profile.
+#
+# ``configs/tool_runtime_profiles.json`` carries no ``tool_profiles`` entry for
+# generate_qa_snapshot, so ``resolve_tool_runtime_profile`` falls back to
+# ``control-plane`` -- the API virtualenv, which deliberately has no nibabel /
+# matplotlib.  Rather than silently skipping the only human-viewable artifact the
+# cardiac path produces, the executor pins a profile that does have the imaging
+# stack.  Precedence:
+#   1. an explicit ``tool_profiles`` entry in configs (config owner wins);
+#   2. ``MRI_AGENT_V4_QA_SNAPSHOT_PROFILE``;
+#   3. ``_QA_SNAPSHOT_DEFAULT_PROFILE`` below.
+# Delete this whole shim once configs maps the tool.
+# ---------------------------------------------------------------------------
+_QA_SNAPSHOT_PROFILE_ENV = "MRI_AGENT_V4_QA_SNAPSHOT_PROFILE"
+_QA_SNAPSHOT_DEFAULT_PROFILE = "legacy-qwen-vllm"
+
+
+def _qa_snapshot_profile_override() -> Optional[str]:
+    try:
+        from packages.tools.runtime_profiles import load_runtime_profile_catalog
+
+        if "generate_qa_snapshot" in (load_runtime_profile_catalog().get("tool_profiles") or {}):
+            return None
+    except Exception:
+        pass
+    return str(os.environ.get(_QA_SNAPSHOT_PROFILE_ENV) or "").strip() or _QA_SNAPSHOT_DEFAULT_PROFILE
+
+
+# Filename markers that identify a NIfTI as a *label* volume rather than an image
+# volume.  The shipped cardiac demo case ships ``patient061_frame01_gt.nii.gz``
+# next to the cine, and ``segment_cardiac_cine`` happily segments every NIfTI in a
+# directory it is handed -- which would push the ground truth through nnUNet as if
+# it were anatomy.
+_LABEL_FILENAME_MARKERS: Tuple[str, ...] = (
+    "_gt",
+    "_seg",
+    "_label",
+    "_labels",
+    "_mask",
+    "_masks",
+    "_pred",
+    "_groundtruth",
+)
+
+
+def _nifti_stem(path: Path) -> str:
+    name = path.name
+    for suffix in (".nii.gz", ".nii"):
+        if name.lower().endswith(suffix):
+            return name[: -len(suffix)]
+    return path.stem
+
+
+def _is_label_nifti(path: Path) -> bool:
+    stem = _nifti_stem(path).lower()
+    return any(stem.endswith(marker) or f"{marker}_" in stem for marker in _LABEL_FILENAME_MARKERS)
+
+
+def _nifti_files_in(directory: Path) -> List[Path]:
+    return sorted(
+        item
+        for item in directory.iterdir()
+        if item.is_file() and (item.name.lower().endswith(".nii.gz") or item.name.lower().endswith(".nii"))
+    )
 
 
 @dataclass(frozen=True)
@@ -540,7 +631,7 @@ class MockExecutorStore:
             except Exception as exc:
                 raise ContractValidationError(f"report_json_path is unreadable: {report_path} ({exc})") from exc
             lesion_meta = _ensure_dict(report_payload.get("lesion_assessment_meta"))
-            succeeded_segmentation_nodes = self._succeeded_segmentation_node_ids()
+            succeeded_segmentation_nodes = self._succeeded_segmentation_node_ids(_LESION_SEGMENTATION_TOOL_NAMES)
             if succeeded_segmentation_nodes:
                 seg_usable = lesion_meta.get("segmentation_usable")
                 validation["report_segmentation_usable"] = seg_usable
@@ -557,19 +648,21 @@ class MockExecutorStore:
             raise ContractValidationError(f"{tool_name} missing required output paths: {details}")
         return validation
 
-    def _succeeded_segmentation_node_ids(self) -> List[str]:
-        """Node ids of every succeeded segmentation node, for any domain.
+    def _succeeded_segmentation_node_ids(self, tool_names: Optional[Iterable[str]] = None) -> List[str]:
+        """Node ids of succeeded segmentation nodes, keyed on tool rather than node id.
 
-        Replaces a hard-coded lookup of the literal node id ``segment_prostate``;
-        the segmentation tool set is derived from compiler metadata capabilities so
-        brain (``brats_mri_segmentation``) and cardiac (``segment_cardiac_cine``)
-        graphs are covered too.
+        Replaces a hard-coded lookup of the literal node id ``segment_prostate``; the
+        tool set is derived from compiler metadata capabilities, so a graph is matched
+        however the compiler happened to name its nodes.  ``tool_names`` narrows the
+        set -- callers that only care about the mask a particular report section
+        describes pass e.g. ``_LESION_SEGMENTATION_TOOL_NAMES``.
         """
+        wanted = frozenset(str(name) for name in tool_names) if tool_names is not None else _SEGMENTATION_TOOL_NAMES
         out: List[str] = []
         for node in self._session.graph.nodes:
             if str(node.status) != "succeeded":
                 continue
-            if _node_tool_identity(node) in _SEGMENTATION_TOOL_NAMES:
+            if _node_tool_identity(node) in wanted:
                 out.append(str(node.node_id))
         return out
 
@@ -1182,6 +1275,9 @@ class MockExecutorStore:
             "identify_sequences": self._exec_identify_sequences,
             "register_to_reference": self._exec_register_to_reference,
             "segment_prostate": self._exec_segment_prostate,
+            "segment_cardiac_cine": self._exec_segment_cardiac_cine,
+            "classify_cardiac_cine_disease": self._exec_classify_cardiac_cine_disease,
+            "generate_qa_snapshot": self._exec_generate_qa_snapshot,
             "package_vlm_evidence": self._exec_package_vlm_evidence,
             "generate_report": self._exec_generate_report,
         }
@@ -1546,6 +1642,489 @@ class MockExecutorStore:
             node.node_id,
             "succeeded",
             "Prostate segmentation completed via v3 segment_prostate",
+            [a.artifact_id for a in artifacts],
+            [],
+        )
+
+    # ------------------------------------------------------------------
+    # Cardiac cine
+    # ------------------------------------------------------------------
+
+    def _resolve_cardiac_cine_input(self, node: ActionNode) -> Path:
+        """Resolve the single cine volume (or safe directory) to segment.
+
+        The compiler emits ``inputs={"cine_ref": "@case.input"}``, which normally
+        resolves through the ``identify_sequences`` mapping to the ``CINE`` entry.
+        When it cannot (no CINE key, no mapping yet) we fall back to the case root
+        -- and then we must not simply hand that directory to the tool: the shipped
+        demo case keeps ``patient061_frame01_gt.nii.gz`` next to the cine, and
+        ``segment_cardiac_cine`` segments *every* NIfTI in a directory it is given,
+        so the ground truth would be pushed through nnUNet as if it were anatomy.
+        """
+        inputs = dict(node.inputs or {})
+        raw = inputs.get("cine_path") or inputs.get("cine_ref") or inputs.get("cine") or ""
+        resolved = self._resolve_sequence_reference(raw, fallback_modality="CINE")
+        text = str(resolved or "").strip()
+        if not text or text.startswith("@"):
+            # Unresolved planner placeholder (``@case.input`` with no CINE in the
+            # sequence index) -- fall back to the case root.
+            text = str(self._session.case_state.input_root or "").strip()
+        if not text:
+            raise ContractValidationError(
+                "segment_cardiac_cine could not resolve a cine input: node inputs "
+                f"{inputs!r} and case input_root are both empty"
+            )
+        candidate = Path(text).expanduser()
+        if candidate.is_file():
+            return candidate.resolve()
+        if not candidate.is_dir():
+            raise ContractValidationError(f"segment_cardiac_cine cine input does not exist: {candidate}")
+
+        nifti_files = _nifti_files_in(candidate)
+        if not nifti_files:
+            raise ContractValidationError(f"segment_cardiac_cine found no NIfTI volume under {candidate}")
+        labels = [item for item in nifti_files if _is_label_nifti(item)]
+        images = [item for item in nifti_files if not _is_label_nifti(item)]
+        if not images:
+            joined = ", ".join(item.name for item in labels)
+            raise ContractValidationError(
+                f"segment_cardiac_cine found only label volumes under {candidate}: {joined}"
+            )
+        if not labels:
+            # Nothing to exclude: hand the directory over and let the tool enumerate
+            # cases itself, which is what the engine's own cardiac path does.
+            return candidate.resolve()
+        if len(images) == 1:
+            return images[0].resolve()
+        raise ContractValidationError(
+            f"segment_cardiac_cine cine input is ambiguous: {candidate} holds {len(images)} candidate "
+            f"cine volumes next to {len(labels)} label volume(s) ({', '.join(item.name for item in labels)}); "
+            "the directory cannot be passed wholesale without segmenting the labels, so set "
+            "node.inputs['cine_path'] to the intended volume"
+        )
+
+    def _cardiac_snapshot_anatomy(self, *, data: Dict[str, Any], cine_path: Path) -> Optional[Path]:
+        """Pick the volume the segmentation is actually defined on.
+
+        ``segment_cardiac_cine`` stages each case as ``<input_dir>/<case_id>_0000.nii.gz``
+        (a symlink to the source volume, or an extracted ED/ES frame for 4-D cine),
+        and nnUNet predicts on that grid.  Overlaying on the staged volume therefore
+        guarantees the mask and the anatomy share a shape; the raw ``cine_path`` may
+        not when ``use_ed_es_only`` split a 4-D series.
+        """
+        case_results = [item for item in (data.get("case_results") or []) if isinstance(item, dict)]
+        case_id = str(case_results[0].get("case_id") or "").strip() if case_results else ""
+        input_dir = str(data.get("input_dir") or "").strip()
+        if case_id and input_dir:
+            for suffix in (".nii.gz", ".nii"):
+                staged = Path(input_dir) / f"{case_id}_0000{suffix}"
+                if staged.exists():
+                    return staged
+        if cine_path.is_file():
+            return cine_path
+        return None
+
+    def _render_cardiac_qa_snapshot(
+        self,
+        *,
+        node: ActionNode,
+        node_dir: str,
+        cine_path: Path,
+        data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Render a PNG of the centre slice with the cardiac mask overlaid.
+
+        ``generate_qa_snapshot`` is not part of any compiled blueprint and wiring it
+        in as its own node would mean editing ``packages/planner`` -- so the
+        segmentation node emits the snapshot as an extra artifact of its own.
+
+        The snapshot is auxiliary: the segmentation itself has already been contract
+        validated by the time we get here, so a snapshot failure does NOT turn a real
+        segmentation into a failed node.  It is recorded loudly instead -- as a
+        ``generate_qa_snapshot`` record with ``ok=false`` in the runtime case_state,
+        as ``qa_snapshot_error`` in ``node.outputs``, and on ``node.notes``.  Nothing
+        fake is written in its place.
+        """
+        empty: Dict[str, Any] = {"artifacts": [], "output_png": "", "error": "", "warnings": []}
+        seg_path = str(data.get("seg_path") or "").strip()
+        if not seg_path:
+            empty["error"] = "segment_cardiac_cine returned no seg_path to overlay"
+            return empty
+        anatomy = self._cardiac_snapshot_anatomy(data=data, cine_path=cine_path)
+        if anatomy is None:
+            empty["error"] = (
+                "no single anatomy volume to overlay: neither the staged nnUNet input nor "
+                f"{cine_path} resolves to a file"
+            )
+            return empty
+
+        run_dir, artifacts_dir, case_state_path = self._ensure_runtime_workspace()
+        output_subdir = _artifact_rel_path(node_dir.split("/", 1)[1] if "/" in node_dir else node_dir, "qa")
+        args: Dict[str, Any] = {
+            "input_nifti": str(anatomy),
+            "mask_nifti": seg_path,
+            "output_subdir": output_subdir,
+            "title": f"{anatomy.name} | cardiac segmentation overlay (1=RV, 2=MYO, 3=LV)",
+        }
+        pred_dir = str(data.get("pred_dir") or "").strip()
+        if pred_dir:
+            pred_path = Path(pred_dir)
+            if pred_path.is_dir() and len(sorted(pred_path.glob("*.nii.gz"))) > 1:
+                # Multi-frame run: let the tool frame-match the overlay itself.
+                args["seg_dir"] = str(pred_path)
+
+        try:
+            result = run_v3_tool(
+                "generate_qa_snapshot",
+                args,
+                case_id=self._session.case_state.case_id,
+                run_id=self._session.graph.graph_id,
+                run_dir=run_dir,
+                artifacts_dir=artifacts_dir,
+                case_state_path=case_state_path,
+                runtime_profile_override=_qa_snapshot_profile_override(),
+            )
+            validation = self._validate_tool_result_contract("generate_qa_snapshot", result.data)
+        except Exception as exc:
+            message = str(exc).strip() or "generate_qa_snapshot failed"
+            self._record_runtime_tool_result(
+                tool_name="generate_qa_snapshot",
+                ok=False,
+                consumable=False,
+                data={"error": message, **args},
+                generated_artifacts=[],
+                validation={"error": message},
+                attempt_id=node.current_attempt_id,
+                rerun_from=node.rerun_from,
+                supersedes=node.supersedes,
+            )
+            empty["error"] = message
+            return empty
+
+        artifacts = self._artifact_refs_from_generated(
+            node=node,
+            tool_name="generate_qa_snapshot",
+            generated_artifacts=result.generated_artifacts,
+        )
+        self._record_runtime_tool_result(
+            tool_name="generate_qa_snapshot",
+            ok=True,
+            data=result.data,
+            generated_artifacts=result.generated_artifacts,
+            consumable=validation["consumable"],
+            validation=validation,
+            attempt_id=node.current_attempt_id,
+            rerun_from=node.rerun_from,
+            supersedes=node.supersedes,
+        )
+        return {
+            "artifacts": artifacts,
+            "output_png": str(result.data.get("output_png") or ""),
+            "error": "",
+            "warnings": list(result.warnings),
+        }
+
+    def _exec_segment_cardiac_cine(self, node: ActionNode) -> ExecutionOutcome:
+        graph = self._session.graph
+        run_dir, artifacts_dir, case_state_path = self._ensure_runtime_workspace()
+        node_dir = make_node_artifact_dir(graph_id=graph.graph_id, step_index=self._step_count + 1, node_id=node.node_id)
+        self._step_count += 1
+        cine_path = self._resolve_cardiac_cine_input(node)
+
+        args: Dict[str, Any] = {
+            "cine_path": str(cine_path),
+            "output_subdir": node_dir.split("/", 1)[1] if "/" in node_dir else node_dir,
+        }
+        inputs = dict(node.inputs or {})
+        # Backend / weights selection is normally supplied by the MRI_AGENT_CARDIAC_*
+        # environment the tool reads itself; only forward explicit node overrides.
+        for key in (
+            "backend_root",
+            "nnunet_python",
+            "results_folder",
+            "task_name",
+            "trainer_class_name",
+            "model",
+            "checkpoint",
+            "acdc_info_cfg",
+        ):
+            value = str(inputs.get(key) or "").strip()
+            if value:
+                args[key] = value
+        for key in ("disable_tta", "use_ed_es_only"):
+            if key in inputs:
+                args[key] = bool(inputs[key])
+        folds = inputs.get("folds")
+        if isinstance(folds, (list, tuple)) and folds:
+            args["folds"] = [int(item) for item in folds]
+
+        result = run_v3_tool(
+            "segment_cardiac_cine",
+            args,
+            case_id=self._session.case_state.case_id,
+            run_id=graph.graph_id,
+            run_dir=run_dir,
+            artifacts_dir=artifacts_dir,
+            case_state_path=case_state_path,
+        )
+        artifacts = self._artifact_refs_from_generated(
+            node=node,
+            tool_name="segment_cardiac_cine",
+            generated_artifacts=result.generated_artifacts,
+        )
+        validation = self._validate_tool_result_contract("segment_cardiac_cine", result.data)
+        # Record the segmentation before the snapshot so the runtime stage order
+        # reflects what actually happened first.
+        self._record_runtime_tool_result(
+            tool_name="segment_cardiac_cine",
+            ok=True,
+            data=result.data,
+            generated_artifacts=result.generated_artifacts,
+            consumable=validation["consumable"],
+            validation=validation,
+            attempt_id=node.current_attempt_id,
+            rerun_from=node.rerun_from,
+            supersedes=node.supersedes,
+        )
+
+        snapshot = self._render_cardiac_qa_snapshot(
+            node=node,
+            node_dir=node_dir,
+            cine_path=cine_path,
+            data=result.data,
+        )
+        artifacts.extend(snapshot["artifacts"])
+
+        warnings = list(result.warnings)
+        warnings.extend(str(item) for item in snapshot["warnings"])
+        if snapshot["error"]:
+            warnings.append(f"generate_qa_snapshot failed: {snapshot['error']}")
+        node.outputs = {
+            "cine_path": str(cine_path),
+            "seg_path": str(result.data.get("seg_path") or ""),
+            "rv_mask_path": str(result.data.get("rv_mask_path") or ""),
+            "myo_mask_path": str(result.data.get("myo_mask_path") or ""),
+            "lv_mask_path": str(result.data.get("lv_mask_path") or ""),
+            "pred_dir": str(result.data.get("pred_dir") or ""),
+            "case_results": [item for item in (result.data.get("case_results") or []) if isinstance(item, dict)],
+            "qa_snapshot_path": snapshot["output_png"],
+            "qa_snapshot_error": snapshot["error"],
+            "note": str(result.data.get("note") or ""),
+            "warnings": warnings,
+            "execution_mode": "v3_tool",
+            "runtime_profile": _runtime_profile_label("segment_cardiac_cine"),
+        }
+        node.notes = "Cardiac cine segmentation completed via v3 segment_cardiac_cine"
+        if snapshot["error"]:
+            node.notes = f"{node.notes} | QA snapshot unavailable: {snapshot['error']}"
+        self._session.case_state.selected_artifacts = [artifact.artifact_id for artifact in artifacts[-3:]]
+        self._session.case_state.active_node_id = node.node_id
+        return ExecutionOutcome(
+            node.node_id,
+            "succeeded",
+            "Cardiac cine segmentation completed via v3 segment_cardiac_cine",
+            [a.artifact_id for a in artifacts],
+            [],
+        )
+
+    def _latest_runtime_tool_data(self, stage: str, tool_name: str) -> Dict[str, Any]:
+        """Most recent successful ``data`` block for a tool in the runtime case_state."""
+        state = self._load_runtime_case_state()
+        records = _ensure_dict(_ensure_dict(state.get("stage_outputs")).get(stage)).get(tool_name)
+        if not isinstance(records, list):
+            return {}
+        for record in reversed(records):
+            if isinstance(record, dict) and record.get("ok") and isinstance(record.get("data"), dict):
+                return dict(record["data"])
+        return {}
+
+    def _resolve_cardiac_segmentation_outputs(self, node: ActionNode) -> Dict[str, str]:
+        """Locate the upstream cardiac segmentation this classify node consumes."""
+        inputs = dict(node.inputs or {})
+        out: Dict[str, str] = {}
+        for key in ("seg_path", "seg_dir", "cine_path", "ed_seg_path", "es_seg_path"):
+            value = str(inputs.get(key) or "").strip()
+            if value and not value.startswith("@"):
+                out[key] = value
+        if out.get("seg_path"):
+            return out
+
+        for candidate in self._session.graph.nodes:
+            if _node_tool_identity(candidate) != "segment_cardiac_cine":
+                continue
+            outputs = _ensure_dict(candidate.outputs)
+            seg_path = str(outputs.get("seg_path") or "").strip()
+            if seg_path:
+                out.setdefault("seg_path", seg_path)
+                for source_key, target_key in (("pred_dir", "seg_dir"), ("cine_path", "cine_path")):
+                    value = str(outputs.get(source_key) or "").strip()
+                    if value:
+                        out.setdefault(target_key, value)
+                return out
+
+        data = self._latest_runtime_tool_data("segment", "segment_cardiac_cine")
+        seg_path = str(data.get("seg_path") or "").strip()
+        if seg_path:
+            out.setdefault("seg_path", seg_path)
+            pred_dir = str(data.get("pred_dir") or "").strip()
+            if pred_dir:
+                out.setdefault("seg_dir", pred_dir)
+        return out
+
+    def _exec_classify_cardiac_cine_disease(self, node: ActionNode) -> ExecutionOutcome:
+        graph = self._session.graph
+        run_dir, artifacts_dir, case_state_path = self._ensure_runtime_workspace()
+        node_dir = make_node_artifact_dir(graph_id=graph.graph_id, step_index=self._step_count + 1, node_id=node.node_id)
+        self._step_count += 1
+
+        resolved = self._resolve_cardiac_segmentation_outputs(node)
+        seg_path = resolved.get("seg_path") or ""
+        if not seg_path:
+            raise ContractValidationError(
+                "classify_cardiac_cine_disease could not resolve seg_path: no succeeded "
+                "segment_cardiac_cine node outputs and no segment stage record in the runtime case_state"
+            )
+
+        args: Dict[str, Any] = {
+            "seg_path": seg_path,
+            "output_subdir": node_dir.split("/", 1)[1] if "/" in node_dir else node_dir,
+        }
+        for key in ("cine_path", "ed_seg_path", "es_seg_path", "patient_info_path"):
+            value = str(resolved.get(key) or dict(node.inputs or {}).get(key) or "").strip()
+            if value and not value.startswith("@"):
+                args[key] = value
+        seg_dir = str(resolved.get("seg_dir") or "").strip()
+        if seg_dir:
+            # Only useful when the segmentation produced several per-frame volumes;
+            # the tool ignores a single-file directory and falls back to seg_path.
+            seg_dir_path = Path(seg_dir)
+            if seg_dir_path.is_dir() and len(sorted(seg_dir_path.glob("*.nii.gz"))) > 1:
+                args["seg_dir"] = seg_dir
+        for key in ("ed_frame", "es_frame"):
+            value = dict(node.inputs or {}).get(key)
+            if isinstance(value, int):
+                args[key] = int(value)
+
+        result = run_v3_tool(
+            "classify_cardiac_cine_disease",
+            args,
+            case_id=self._session.case_state.case_id,
+            run_id=graph.graph_id,
+            run_dir=run_dir,
+            artifacts_dir=artifacts_dir,
+            case_state_path=case_state_path,
+        )
+        artifacts = self._artifact_refs_from_generated(
+            node=node,
+            tool_name="classify_cardiac_cine_disease",
+            generated_artifacts=result.generated_artifacts,
+        )
+        validation = self._validate_tool_result_contract("classify_cardiac_cine_disease", result.data)
+        predicted_group = str(result.data.get("predicted_group") or "")
+        node.outputs = {
+            "classification_path": str(result.data.get("classification_path") or ""),
+            "predicted_group": predicted_group,
+            "ground_truth_group": str(result.data.get("ground_truth_group") or ""),
+            "ground_truth_match": bool(result.data.get("ground_truth_match")),
+            "needs_vlm_review": bool(result.data.get("needs_vlm_review")),
+            "metrics": _ensure_dict(result.data.get("metrics")),
+            "phase_indices": _ensure_dict(result.data.get("phase_indices")),
+            "seg_path": seg_path,
+            "warnings": list(result.warnings),
+            "execution_mode": "v3_tool",
+            "runtime_profile": _runtime_profile_label("classify_cardiac_cine_disease"),
+        }
+        node.notes = f"Cardiac disease classification via v3 classify_cardiac_cine_disease: {predicted_group or 'unknown'}"
+        self._session.case_state.selected_artifacts = [artifact.artifact_id for artifact in artifacts[-3:]]
+        self._session.case_state.active_node_id = node.node_id
+        self._record_runtime_tool_result(
+            tool_name="classify_cardiac_cine_disease",
+            ok=True,
+            data=result.data,
+            generated_artifacts=result.generated_artifacts,
+            consumable=validation["consumable"],
+            validation=validation,
+            attempt_id=node.current_attempt_id,
+            rerun_from=node.rerun_from,
+            supersedes=node.supersedes,
+        )
+        return ExecutionOutcome(
+            node.node_id,
+            "succeeded",
+            f"Cardiac cine disease classified via v3 classify_cardiac_cine_disease: {predicted_group or 'unknown'}",
+            [a.artifact_id for a in artifacts],
+            [],
+        )
+
+    def _exec_generate_qa_snapshot(self, node: ActionNode) -> ExecutionOutcome:
+        """Standalone QA-snapshot node.
+
+        Unlike the snapshot the segmentation node piggybacks, a node whose whole job
+        is the snapshot must fail when the snapshot fails.
+        """
+        graph = self._session.graph
+        run_dir, artifacts_dir, case_state_path = self._ensure_runtime_workspace()
+        node_dir = make_node_artifact_dir(graph_id=graph.graph_id, step_index=self._step_count + 1, node_id=node.node_id)
+        self._step_count += 1
+        inputs = dict(node.inputs or {})
+        input_nifti = self._resolve_sequence_reference(inputs.get("input_nifti"))
+        if not input_nifti or str(input_nifti).startswith("@"):
+            raise ContractValidationError(
+                f"generate_qa_snapshot missing a resolvable input_nifti (node inputs {inputs!r})"
+            )
+        args: Dict[str, Any] = {
+            "input_nifti": str(input_nifti),
+            "output_subdir": node_dir.split("/", 1)[1] if "/" in node_dir else node_dir,
+        }
+        for key in ("mask_nifti", "seg_dir", "title", "output_png"):
+            value = str(inputs.get(key) or "").strip()
+            if value and not value.startswith("@"):
+                args[key] = value
+
+        result = run_v3_tool(
+            "generate_qa_snapshot",
+            args,
+            case_id=self._session.case_state.case_id,
+            run_id=graph.graph_id,
+            run_dir=run_dir,
+            artifacts_dir=artifacts_dir,
+            case_state_path=case_state_path,
+            runtime_profile_override=_qa_snapshot_profile_override(),
+        )
+        artifacts = self._artifact_refs_from_generated(
+            node=node,
+            tool_name="generate_qa_snapshot",
+            generated_artifacts=result.generated_artifacts,
+        )
+        validation = self._validate_tool_result_contract("generate_qa_snapshot", result.data)
+        node.outputs = {
+            "output_png": str(result.data.get("output_png") or ""),
+            "input_nifti": str(result.data.get("input_nifti") or ""),
+            "mask_nifti": str(result.data.get("mask_nifti") or ""),
+            "selected_frame": result.data.get("selected_frame"),
+            "selected_slice": result.data.get("selected_slice"),
+            "warnings": list(result.warnings),
+            "execution_mode": "v3_tool",
+            "runtime_profile": _runtime_profile_label("generate_qa_snapshot"),
+        }
+        node.notes = "QA snapshot rendered via v3 generate_qa_snapshot"
+        self._session.case_state.selected_artifacts = [artifact.artifact_id for artifact in artifacts[-3:]]
+        self._session.case_state.active_node_id = node.node_id
+        self._record_runtime_tool_result(
+            tool_name="generate_qa_snapshot",
+            ok=True,
+            data=result.data,
+            generated_artifacts=result.generated_artifacts,
+            consumable=validation["consumable"],
+            validation=validation,
+            attempt_id=node.current_attempt_id,
+            rerun_from=node.rerun_from,
+            supersedes=node.supersedes,
+        )
+        return ExecutionOutcome(
+            node.node_id,
+            "succeeded",
+            "QA snapshot rendered via v3 generate_qa_snapshot",
             [a.artifact_id for a in artifacts],
             [],
         )

@@ -1,6 +1,7 @@
 # V4 IntentSpec / Semantic Planning IR
 
 Last updated: 2026-03-20
+Revised: 2026-07-24 — §2.1 capability vocabulary corrected against `packages/planner/service.py`.
 
 This document defines the semantic intent layer of the `MRI_Agent_v4` planner.
 
@@ -49,16 +50,22 @@ Even when the LLM is enabled, it can only produce an `IntentSpec`-style semantic
 
 ### 2.1 Explicit requested capabilities
 
-Only capabilities the user states outright are collected here:
+Only capabilities the user states outright are collected here. The complete vocabulary checked by `_explicit_requested_capabilities` in `packages/planner/service.py`, in the order it is tested:
 
+- `full_pipeline`
 - `register`
 - `segment`
 - `classify`
-- `report`
-- `qa`
 - `lesion`
 - `roi_features`
-- `full_pipeline`
+- `report`
+- `qa`
+- `custom_analysis`
+
+Two filters apply on top of the keyword match:
+
+- a capability is only kept if the active domain advertises it. The per-domain catalogs come from `discover_capabilities()["domain_capabilities"]`, plus `roi_features`, which `_domain_capability_map()` injects for any domain whose rulebook `tool_order` contains `extract_roi_features`. As of this writing that yields `roi_features` for `prostate` and `brain` but not `cardiac`, `classify` for `brain` and `cardiac` but not `prostate`, and `lesion` and `register` for `prostate` only.
+- being extracted here does not mean the capability materializes a tool. `qa` and `custom_analysis` are advertised by all three domains and are recognized here, but no compiler capability expansion rule keys on them, so on their own they compile to `identify_sequences` and nothing more. See `V4_PLANNER_OUTPUT_CONTRACT.md` §2.2.
 
 ### 2.2 Inferred requested capabilities
 
