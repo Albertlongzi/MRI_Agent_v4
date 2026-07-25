@@ -106,6 +106,30 @@ const state = {
   // this from the backend, so the placeholder was never cleared.
   reflectorState: { active: false, node_id: null, phase: null, attempt: 0, reasoning: "" },
   reflectorDismissed: false,
+  // ── Execution runner mirror ──────────────────────
+  // Every field here is copied from GET /api/execute/status. Nothing in the UI
+  // may claim a node is running unless the backend runner says so: the runner
+  // owns a background thread around the (still synchronous) store call and is
+  // the only source of truth for "what is executing right now".
+  exec: {
+    running: false,
+    token: null,
+    nodeId: null,
+    nodeIdConfirmed: false,
+    mismatch: null,
+    mode: null,
+    elapsedS: 0,        // last whole-run value reported by the backend
+    nodeElapsedS: 0,    // last per-node value reported by the backend
+    anchorMs: 0,        // performance.now() when those values arrived
+    error: null,
+    errorType: null,
+    timedOut: false,
+    stepsCompleted: 0,
+    result: null,
+    graphSource: null,
+    pollFailures: 0,
+    dismissedError: false,
+  },
 };
 
 // ── Layout constants ─────────────────────────────
@@ -417,10 +441,12 @@ function renderPipelineStrip() {
   let html = "";
   nodes.forEach((n, i) => {
     const sel = n.node_id === state.selectedNodeId;
-    const cls = [n.status || "planned", sel ? "selected" : ""].filter(Boolean).join(" ");
+    const executing = isExecutingNode(n.node_id);
+    const st  = executing ? "running" : (n.status || "planned");
+    const cls = [st, sel ? "selected" : "", executing ? "executing" : ""].filter(Boolean).join(" ");
     html += `
       <div class="pip-step">
-        <div class="pip-dot ${cls}" data-node-id="${escapeAttr(n.node_id)}" title="${escapeAttr(n.title)} (${escapeAttr(n.status||'planned')})">
+        <div class="pip-dot ${cls}" data-node-id="${escapeAttr(n.node_id)}" title="${escapeAttr(n.title)} (${escapeAttr(st)})">
           <div class="pip-dot-inner"></div>
           <span class="pip-label">${escapeHtml(truncate(n.title, 12))}</span>
         </div>
@@ -445,10 +471,14 @@ function renderGraph() {
   const nodesHtml = (graph.nodes||[]).map((n, i) => {
     const l   = state.nodeLayouts?.[n.node_id] || defaultNodeLayout(i);
     const sel = n.node_id === state.selectedNodeId;
-    const st  = n.status || "planned";
+    // While a run is in flight the graph payload is a snapshot taken before the
+    // node started, so it still reads "planned". The runner is the authority on
+    // what is executing right now — trust it, and label it as running.
+    const executing = isExecutingNode(n.node_id);
+    const st  = executing ? "running" : (n.status || "planned");
     const tool = n.tool_name || n.action_type || "";
     return `
-      <div class="graph-node status-${escapeHtml(st)}${sel?" selected":""}"
+      <div class="graph-node status-${escapeHtml(st)}${sel?" selected":""}${executing?" is-executing":""}"
         data-node-id="${escapeAttr(n.node_id)}"
         style="left:${l.x}px;top:${l.y}px;width:${NODE_W}px"
         role="button" tabindex="0" aria-label="${escapeAttr(n.title)} — ${escapeAttr(st)}">
@@ -456,7 +486,9 @@ function renderGraph() {
         <div class="node-content">
           <div class="node-top-row">
             <span class="node-kind">${escapeHtml(n.kind)}</span>
-            <span class="spill ${escapeHtml(st)}">${escapeHtml(st)}</span>
+            ${executing
+              ? `<span class="spill running node-timer" title="${escapeAttr(execRunLabel())}">${escapeHtml(execPillText())}</span>`
+              : `<span class="spill ${escapeHtml(st)}">${escapeHtml(st)}</span>`}
           </div>
           <div class="node-title">${escapeHtml(n.title)}</div>
           ${tool ? `<div class="node-tool-name">${escapeHtml(tool)}</div>` : ""}
@@ -713,7 +745,12 @@ function buildNodeTab() {
   const retryHistory = node.retry_history || [];
   const rs = state.reflectorState;
 
-  const errorSection = isFailed && node.last_error ? `
+  // The executor records a node's failure reason on `notes` (see
+  // ExecutorStore._run_node: "Surface the reason on the node itself so the
+  // inspector can render it"), while `last_error` is only ever set by the
+  // fallback demo state. Accept either, or a failed node shows no error at all.
+  const nodeError    = node.last_error || (isFailed ? node.notes : null);
+  const errorSection = isFailed && nodeError ? `
     <div class="insp-section">
       <div class="sec-label">⚠ Error Details</div>
       <div class="error-block">
@@ -721,7 +758,7 @@ function buildNodeTab() {
           <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><circle cx="6" cy="6" r="5" stroke="#FF8080" stroke-width="1.2"/><line x1="6" y1="3.5" x2="6" y2="6.5" stroke="#FF8080" stroke-width="1.2" stroke-linecap="round"/><circle cx="6" cy="8.5" r="0.6" fill="#FF8080"/></svg>
           Runtime Error
         </div>
-        <div class="error-block-msg">${escapeHtml(node.last_error)}</div>
+        <div class="error-block-msg">${escapeHtml(nodeError)}</div>
         ${node.error_ts ? `<div style="font-family:var(--font-mono);font-size:9px;color:var(--muted);margin-top:2px">${escapeHtml(formatTs(node.error_ts))}</div>` : ""}
       </div>
     </div>` : "";
@@ -782,7 +819,7 @@ function buildNodeTab() {
         <span class="kv-k">Owner</span>  <span class="kv-v mono">${escapeHtml(node.owner||"—")}</span>
         <span class="kv-k">Tool</span>   <span class="kv-v mono">${escapeHtml(node.tool_name||"—")}</span>
       </div>
-      ${node.notes ? `<p style="font-size:12px;color:var(--text-dim);margin-top:2px">${escapeHtml(node.notes)}</p>` : ""}
+      ${node.notes && node.notes !== nodeError ? `<p style="font-size:12px;color:var(--text-dim);margin-top:2px">${escapeHtml(node.notes)}</p>` : ""}
     </div>
 
     ${(node.depends_on||[]).length ? `
@@ -972,6 +1009,351 @@ function advanceExecutionUntilDone(maxSteps = 20) {
   renderAll();
 }
 
+/* ══════════════════════════════════════════════════
+   BACKGROUND EXECUTION (runner-driven)
+
+   POST /api/execute/next        -> starts a thread, returns at once
+   GET  /api/execute/status      -> instant, even mid-node (never takes the
+                                    store lock while a run is in flight)
+
+   The UI polls the status endpoint instead of blocking on the POST, so the
+   executing node is visible while it executes. Everything rendered as
+   "running" comes from that endpoint; when it stops reporting running, the
+   graph is refetched and whatever the backend says — succeeded or failed —
+   is what gets drawn.
+══════════════════════════════════════════════════ */
+const EXEC_POLL_MS = 400;   // status poll cadence
+const EXEC_TICK_MS = 100;   // local elapsed-counter repaint
+const EXEC_MAX_POLL_FAILURES = 5;
+
+let execPollTimer = null;
+let execTickTimer = null;
+
+function isExecutingNode(nodeId) {
+  return !!(state.exec.running && nodeId && state.exec.nodeId === nodeId);
+}
+
+// Server-reported elapsed, interpolated locally between polls so the counter
+// ticks smoothly. Re-anchored on every poll, so it can never drift away from
+// the backend's own number.
+function execElapsedSeconds() {
+  const ex = state.exec;
+  if (!ex.running) return ex.elapsedS || 0;
+  const drift = (performance.now() - ex.anchorMs) / 1000;
+  return (ex.elapsedS || 0) + Math.max(0, drift);
+}
+
+// Seconds the node currently on screen has been executing. For "run to end"
+// this restarts at each node, so the chip on the node is about that node.
+function execNodeElapsedSeconds() {
+  const ex = state.exec;
+  if (!ex.running) return ex.nodeElapsedS || 0;
+  const drift = (performance.now() - ex.anchorMs) / 1000;
+  return (ex.nodeElapsedS || 0) + Math.max(0, drift);
+}
+
+function formatElapsed(seconds) {
+  const s = Math.max(0, Number(seconds) || 0);
+  return s < 60 ? `${s.toFixed(1)}s` : `${Math.floor(s/60)}m ${(s%60).toFixed(0).padStart(2,"0")}s`;
+}
+
+function execPillText() {
+  return `running · ${formatElapsed(execNodeElapsedSeconds())}`;
+}
+
+function execRunLabel() {
+  const ex = state.exec;
+  return `execution runner · ${ex.mode || "next"} · ${ex.token || "?"}`;
+}
+
+function graphSignature(g) {
+  if (!g) return "";
+  return [
+    g.graph_id || "", g.version || "", g.status || "",
+    (g.nodes||[]).map(n => `${n.node_id}:${n.status}`).join(","),
+    (g.artifacts||[]).length,
+  ].join("|");
+}
+
+function setExecControlsDisabled(disabled) {
+  ["execute-next","execute-until-done","reset-demo","apply-latest-proposal"].forEach(id => {
+    const btn = document.getElementById(id);
+    if (btn) btn.disabled = !!disabled;
+  });
+}
+
+function resetExecState() {
+  Object.assign(state.exec, {
+    running:false, token:null, nodeId:null, nodeIdConfirmed:false, mismatch:null,
+    mode:null, elapsedS:0, nodeElapsedS:0, anchorMs:performance.now(), error:null, errorType:null,
+    timedOut:false, stepsCompleted:0, result:null, graphSource:null,
+    pollFailures:0, dismissedError:false,
+  });
+}
+
+// Copy a /api/execute/status (or start) payload into state.exec. Returns true
+// when the graph payload changed and a full re-render is needed.
+function applyExecStatus(payload) {
+  if (!payload || typeof payload !== "object") return false;
+  const ex = state.exec;
+  ex.running          = !!payload.running;
+  ex.token            = payload.run_token ?? ex.token;
+  ex.nodeId           = payload.node_id ?? null;
+  ex.nodeIdConfirmed  = !!payload.node_id_confirmed;
+  ex.mismatch         = payload.node_id_mismatch ?? null;
+  ex.mode             = payload.mode ?? ex.mode;
+  ex.elapsedS         = Number(payload.elapsed_s) || 0;
+  ex.nodeElapsedS     = Number(payload.node_elapsed_s ?? payload.elapsed_s) || 0;
+  ex.anchorMs         = performance.now();
+  ex.error            = payload.error ?? null;
+  ex.errorType        = payload.error_type ?? null;
+  ex.timedOut         = !!payload.timed_out;
+  ex.stepsCompleted   = Number(payload.steps_completed) || 0;
+  ex.result           = payload.result ?? ex.result;
+  ex.graphSource      = payload.graph_source ?? null;
+  if (ex.error) ex.dismissedError = false;
+  if (ex.mismatch) {
+    console.warn("[exec] runner reported a node-id mismatch", ex.mismatch);
+  }
+
+  let graphChanged = false;
+  const graph = normalizeGraphPayload(payload);
+  if (graph && Array.isArray(graph.nodes)) {
+    if (graphSignature(graph) !== graphSignature(state.graph)) {
+      applySnapshot({
+        session: payload.session || state.session,
+        graph,
+        events: graph.events || state.events,
+      }, "api");
+      graphChanged = true;
+    }
+  }
+  return graphChanged;
+}
+
+function renderExecBanner() {
+  const el = document.getElementById("exec-banner");
+  if (!el) return;
+  const ex = state.exec;
+  const showError = !!ex.error && !ex.dismissedError;
+  // A "next" result reports `status`; an "until_done" result reports
+  // `statuses: [...]` and no `status`, and leaves `error` null because the
+  // thread was healthy and it was the node that failed. Keying only off
+  // `status` therefore hid the banner for every run-to-end failure.
+  const res = ex.result || null;
+  const failedResult =
+    !ex.running &&
+    !!res &&
+    (res.status === "failed" ||
+      res.graph_status === "failed" ||
+      (Array.isArray(res.statuses) && res.statuses.includes("failed")));
+
+  if (!ex.running && !showError && !failedResult) {
+    el.classList.add("hidden");
+    el.innerHTML = "";
+    return;
+  }
+  el.classList.remove("hidden");
+  el.classList.toggle("error", showError || !!failedResult);
+
+  if (ex.running) {
+    const node  = nodeById(ex.nodeId);
+    const label = node ? (node.title || ex.nodeId) : (ex.nodeId || "selecting node…");
+    const modeLabel = ex.mode === "until_done" ? "Run to end" : "Execute next";
+    el.innerHTML = `
+      <div class="exec-spinner"></div>
+      <div class="exec-banner-text">
+        <div class="exec-banner-title">
+          ${escapeHtml(modeLabel)} · executing <strong>${escapeHtml(label)}</strong>
+          <span class="exec-elapsed" data-exec-elapsed>${escapeHtml(formatElapsed(execElapsedSeconds()))}</span>
+        </div>
+        <div class="exec-banner-sub">${escapeHtml(execRunLabel())}${ex.stepsCompleted ? ` · ${ex.stepsCompleted} node(s) done` : ""}${ex.timedOut ? " · OVERRAN WALL-CLOCK GUARD" : ""}</div>
+      </div>`;
+    return;
+  }
+
+  const title = showError
+    ? `Execution failed${ex.errorType ? ` (${ex.errorType})` : ""}`
+    : `Node ${ex.result?.node_id || ""} failed`;
+  const detail = showError
+    ? ex.error
+    : (nodeById(ex.result?.node_id)?.notes || ex.result?.message || "See the Inspector for details.");
+  el.innerHTML = `
+    <div class="exec-banner-icon">!</div>
+    <div class="exec-banner-text">
+      <div class="exec-banner-title">${escapeHtml(title)}</div>
+      <div class="exec-banner-sub">${escapeHtml(detail || "")}</div>
+    </div>
+    <div class="exec-banner-actions">
+      <button class="banner-btn dismiss" id="exec-banner-dismiss" type="button">Dismiss</button>
+    </div>`;
+  document.getElementById("exec-banner-dismiss")?.addEventListener("click", () => {
+    state.exec.dismissedError = true;
+    state.exec.result = null;
+    renderExecBanner();
+  });
+}
+
+// Cheap repaint of only the things that change between polls: the per-node
+// elapsed chip and the banner clock. No graph re-render, so the pulse
+// animation is not restarted 10x/second.
+function tickExecTimers() {
+  if (!state.exec.running) return;
+  const pill = execPillText();
+  document.querySelectorAll(".spill.node-timer").forEach(el => { el.textContent = pill; });
+  const banner = document.querySelector("[data-exec-elapsed]");
+  if (banner) banner.textContent = formatElapsed(execElapsedSeconds());
+}
+
+function startExecTicker() {
+  if (execTickTimer) return;
+  execTickTimer = setInterval(tickExecTimers, EXEC_TICK_MS);
+}
+
+function stopExecTicker() {
+  if (execTickTimer) { clearInterval(execTickTimer); execTickTimer = null; }
+}
+
+async function pollExecStatus() {
+  execPollTimer = null;
+  let payload = null;
+  try {
+    payload = await fetchJson("/api/execute/status");
+    state.exec.pollFailures = 0;
+  } catch (err) {
+    console.error(err);
+    state.exec.pollFailures += 1;
+    if (state.exec.pollFailures >= EXEC_MAX_POLL_FAILURES) {
+      // Never leave a spinner running on a backend we cannot reach.
+      state.exec.running = false;
+      state.exec.error = `lost contact with the backend after ${state.exec.pollFailures} status polls; the run state is unknown`;
+      state.exec.errorType = "StatusPollFailed";
+      state.exec.dismissedError = false;
+      await finishExecution({ refresh: false });
+      return;
+    }
+    execPollTimer = setTimeout(pollExecStatus, EXEC_POLL_MS);
+    return;
+  }
+
+  const graphChanged = applyExecStatus(payload);
+  if (graphChanged) renderAll(); else updateExecOverlay();
+
+  if (state.exec.running) {
+    execPollTimer = setTimeout(pollExecStatus, EXEC_POLL_MS);
+  } else {
+    await finishExecution({ refresh: true });
+  }
+}
+
+function beginExecPolling() {
+  startExecTicker();
+  if (execPollTimer) return;
+  execPollTimer = setTimeout(pollExecStatus, 80);
+}
+
+async function finishExecution({ refresh = true } = {}) {
+  if (execPollTimer) { clearTimeout(execPollTimer); execPollTimer = null; }
+  stopExecTicker();
+  state.exec.running = false;
+  if (refresh) {
+    try { await loadFromApi(); }
+    catch (err) { console.error(err); }
+  }
+  const res = state.exec.result;
+  if (state.exec.error) {
+    state.lastAction = `Execution failed: ${state.exec.error}`;
+  } else if (res && res.mode === "until_done") {
+    state.lastAction = `Run to end finished (${res.step_count || 0} node(s), graph ${res.graph_status || "unknown"}).`;
+  } else if (res && res.executed) {
+    state.lastAction = `Executed ${res.node_id}: ${res.status}.`;
+  } else if (res) {
+    state.lastAction = res.reason || "No runnable node.";
+  }
+  setExecControlsDisabled(false);
+  renderAll();
+}
+
+// Re-applies the runner overlay onto an already-rendered graph.
+function updateExecOverlay() {
+  const runningId = state.exec.running ? state.exec.nodeId : null;
+  document.querySelectorAll("#graph-canvas .graph-node").forEach(el => {
+    const isRun = !!runningId && el.dataset.nodeId === runningId;
+    const pill  = el.querySelector(".spill");
+    el.classList.toggle("is-executing", isRun);
+    if (isRun) {
+      el.classList.add("status-running");
+      const bar = el.querySelector(".node-bar");
+      if (bar) bar.className = "node-bar status-running";
+      if (pill) {
+        pill.className = "spill running node-timer";
+        pill.title = execRunLabel();
+        pill.textContent = execPillText();
+      }
+    } else if (pill && pill.classList.contains("node-timer")) {
+      // Restore the pill to whatever the graph actually says.
+      const st = nodeById(el.dataset.nodeId)?.status || "planned";
+      pill.className = `spill ${st}`;
+      pill.removeAttribute("title");
+      pill.textContent = st;
+    }
+  });
+  document.querySelectorAll("#pipeline-strip .pip-dot").forEach(dot => {
+    dot.classList.toggle("executing", !!runningId && dot.dataset.nodeId === runningId);
+  });
+  renderExecBanner();
+}
+
+async function startExecution(mode) {
+  const path = mode === "until_done" ? "/api/execute/until-done" : "/api/execute/next";
+  const wasErrored = state.exec.error;
+  resetExecState();
+  setExecControlsDisabled(true);
+  renderExecBanner();
+
+  let response, payload;
+  try {
+    response = await fetch(API_BASE + path, { method: "POST" });
+    payload  = await response.json().catch(() => null);
+  } catch (err) {
+    // Backend unreachable — fall back to the local demo animation, exactly as
+    // the synchronous version did.
+    console.error(err);
+    setExecControlsDisabled(false);
+    if (wasErrored) state.exec.error = null;
+    if (mode === "until_done") advanceExecutionUntilDone(); else advanceExecution();
+    return;
+  }
+
+  if (response.status === 409) {
+    // A run is already in flight: do not queue a second one, just follow it.
+    const detail = (payload && payload.detail) || payload || {};
+    applyExecStatus(detail);
+    state.exec.error = null;
+    state.lastAction = detail.message || "A run is already in flight.";
+    state.connected = true; state.source = "api";
+    renderAll();
+    beginExecPolling();
+    return;
+  }
+
+  if (!response.ok) {
+    state.exec.running = false;
+    state.exec.error = `execute request failed: HTTP ${response.status}`;
+    state.exec.errorType = "HttpError";
+    setExecControlsDisabled(false);
+    renderAll();
+    return;
+  }
+
+  state.connected = true; state.source = "api";
+  applyExecStatus(payload);
+  if (state.exec.nodeId) state.selectedNodeId = state.exec.nodeId;
+  renderAll();
+  if (state.exec.running) beginExecPolling();
+  else await finishExecution({ refresh: true });
+}
+
 function applyLatestProposal() {
   const ps = state.graph.proposals || [];
   if (!ps.length) { state.lastAction = "No proposals to apply."; renderAll(); return; }
@@ -983,9 +1365,26 @@ function applyLatestProposal() {
 }
 
 async function resetDemo() {
+  if (state.exec.running) {
+    state.lastAction = "Cannot reset while a node is executing.";
+    renderAll();
+    return;
+  }
   setBusy(true, "Resetting…");
   try {
-    const r = await fetchJson("/api/reset", {method:"POST"});
+    const response = await fetch(API_BASE + "/api/reset", {method:"POST"});
+    if (response.status === 409) {
+      // The backend refuses to reset under a run. Follow that run instead of
+      // silently dropping the UI into the offline demo graph.
+      const detail = (await response.json().catch(() => null))?.detail || {};
+      state.lastAction = detail.message || "Reset refused: a run is in flight.";
+      setBusy(false);
+      renderAll();
+      await adoptRunInFlight();
+      return;
+    }
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const r = await response.json();
     if (r.session||r.graph) {
       applySnapshot({session:r.session||state.session,graph:r.graph||state.graph,events:[]}, "api");
       state.connected=true; state.source="api"; state.lastAction="Reset from backend."; renderAll(); setBusy(false); return;
@@ -1008,15 +1407,31 @@ function renderAll() {
   renderViewer();
   renderInspector();
   renderReflectorBanner();
+  renderExecBanner();
 }
 
 // ── API loading ───────────────────────────────────
-async function loadFromApi() {
-  const [sR,gR,eR,tR,dR,cR,bR,pR] = await Promise.allSettled([
-    fetchJson("/api/session"), fetchJson("/api/graph"), fetchJson("/api/events"),
+// Catalog/health endpoints only. None of these touch the session store, so
+// they stay fast even while a node is executing — unlike /api/session,
+// /api/graph and /api/events, which all take the store lock.
+async function loadCatalogs() {
+  const [tR,dR,cR,bR,pR] = await Promise.allSettled([
     fetchJson("/api/tools"),   fetchJson("/api/domains"), fetchJson("/api/capabilities"),
     fetchJson("/api/tools/bridge/health"), fetchJson("/api/planner/health"),
   ]);
+  state.toolCatalog      = tR.status==="fulfilled" ? tR.value?.tools||[]  : [];
+  state.domainCatalog    = dR.status==="fulfilled" ? dR.value?.domains||{}: {};
+  state.capabilitySummary= cR.status==="fulfilled" ? cR.value||{capabilities:[],tool_capabilities:{},domain_capabilities:{}} : {capabilities:[],tool_capabilities:{},domain_capabilities:{}};
+  state.bridgeHealth     = bR.status==="fulfilled" ? bR.value||null : null;
+  state.plannerHealth    = pR.status==="fulfilled" ? pR.value||null : null;
+}
+
+async function loadFromApi() {
+  const catalogs = loadCatalogs();
+  const [sR,gR,eR] = await Promise.allSettled([
+    fetchJson("/api/session"), fetchJson("/api/graph"), fetchJson("/api/events"),
+  ]);
+  await catalogs;
   if (sR.status==="fulfilled"||gR.status==="fulfilled"||eR.status==="fulfilled") {
     state.connected=true; state.source="api";
     const sp = sR.status==="fulfilled" ? sR.value : null;
@@ -1026,11 +1441,6 @@ async function loadFromApi() {
       graph:   normalizeGraphPayload(gp)||normalizeGraphPayload(sp?.graph)||gp,
       events:  normalizeEventsPayload(eR.status==="fulfilled"?eR.value:[]),
     }, "api");
-    state.toolCatalog      = tR.status==="fulfilled" ? tR.value?.tools||[]  : [];
-    state.domainCatalog    = dR.status==="fulfilled" ? dR.value?.domains||{}: {};
-    state.capabilitySummary= cR.status==="fulfilled" ? cR.value||{capabilities:[],tool_capabilities:{},domain_capabilities:{}} : {capabilities:[],tool_capabilities:{},domain_capabilities:{}};
-    state.bridgeHealth     = bR.status==="fulfilled" ? bR.value||null : null;
-    state.plannerHealth    = pR.status==="fulfilled" ? pR.value||null : null;
     state.session.tool_catalog = state.toolCatalog;
     state.session.capabilities = state.capabilitySummary?.capabilities||[];
     if (!state.graph.nodes.some(n=>n.node_id===state.selectedNodeId)) state.selectedNodeId=state.graph.nodes[0]?.node_id||null;
@@ -1041,10 +1451,35 @@ async function loadFromApi() {
 
 async function refreshFromApiOrFallback() {
   setBusy(true, "Connecting…");
-  try { await loadFromApi(); }
-  catch(err) { console.error(err); applySnapshot(fallbackSnapshot,"fallback"); state.lastAction="Demo mode."; }
-  renderAll();
+  // Ask the runner first: it answers instantly even mid-node, whereas
+  // /api/session and /api/graph would block for the rest of the node.
+  const adopted = await adoptRunInFlight();
+  if (!adopted) {
+    try { await loadFromApi(); }
+    catch(err) { console.error(err); applySnapshot(fallbackSnapshot,"fallback"); state.lastAction="Demo mode."; }
+    renderAll();
+  }
   setBusy(false);
+}
+
+// A page load in the middle of a run must not sit on a blocked /api/graph or
+// land on a frozen graph: adopt the run and follow it to the end.
+async function adoptRunInFlight() {
+  let status = null;
+  try { status = await fetchJson("/api/execute/status"); }
+  catch (err) { console.error(err); return false; }
+  if (!status || !status.running) return false;
+  state.connected = true; state.source = "api";
+  applyExecStatus(status);          // graph/session from the runner's snapshot
+  await loadCatalogs();             // lock-free endpoints only
+  state.session.tool_catalog = state.toolCatalog;
+  state.session.capabilities = state.capabilitySummary?.capabilities || [];
+  if (state.exec.nodeId) state.selectedNodeId = state.exec.nodeId;
+  setExecControlsDisabled(true);
+  state.lastAction = `Rejoined run ${status.run_token} in flight (${status.node_id}).`;
+  renderAll();
+  beginExecPolling();
+  return true;
 }
 
 // ── Chat action ───────────────────────────────────
@@ -1118,28 +1553,14 @@ document.getElementById("send-patch")?.addEventListener("click", async () => {
 });
 
 // ── Graph controls ────────────────────────────────
+// No blocking "Executing…" overlay any more: the POST returns immediately and
+// the graph stays visible while the node runs.
 document.getElementById("execute-next")?.addEventListener("click", async () => {
-  setBusy(true,"Executing…");
-  try {
-    const r = await fetchJson("/api/execute/next",{method:"POST"});
-    if (r.session||r.graph) {
-      applySnapshot({session:r.session||state.session,graph:r.graph||state.graph,events:r.graph?.events||state.events},"api");
-      state.connected=true; state.source="api"; state.lastAction=r.message||"Executed."; renderAll(); setBusy(false); return;
-    }
-  } catch(err) { console.error(err); }
-  advanceExecution(); setBusy(false);
+  await startExecution("next");
 });
 
 document.getElementById("execute-until-done")?.addEventListener("click", async () => {
-  setBusy(true,"Running full pipeline…");
-  try {
-    const r = await fetchJson("/api/execute/until-done",{method:"POST"});
-    if (r.session||r.graph) {
-      applySnapshot({session:r.session||state.session,graph:r.graph||state.graph,events:r.graph?.events||state.events},"api");
-      state.connected=true; state.source="api"; state.lastAction=`Run-to-end finished: ${r.graph?.status || "unknown"}.`; renderAll(); setBusy(false); return;
-    }
-  } catch(err) { console.error(err); }
-  advanceExecutionUntilDone(); setBusy(false);
+  await startExecution("until_done");
 });
 
 document.getElementById("apply-latest-proposal")?.addEventListener("click", async () => {
@@ -1298,15 +1719,13 @@ function renderReflectorBanner() {
 async function executeNextFromReflector() {
   const rs = state.reflectorState;
   if (!rs) return;
+  if (state.connected) {
+    // Same async path as the Execute Next button — no blocking overlay.
+    state.reflectorState = null;
+    await startExecution('next');
+    return;
+  }
   setBusy(true, 'Retrying failed node…');
-  try {
-    const r = await fetchJson('/api/execute/next', { method: 'POST' });
-    if (r.session || r.graph) {
-      applySnapshot({ session: r.session||state.session, graph: r.graph||state.graph, events: r.graph?.events||state.events }, 'api');
-      state.reflectorState = null;
-      renderAll(); setBusy(false); return;
-    }
-  } catch(err) { console.error(err); }
   // Local simulation: move failed → retrying → succeeded
   const node = nodeById(rs.node_id);
   if (node) {

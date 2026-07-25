@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
 
+from apps.api.execution_runner import ExecutionRunner, RunnerBusy
 from packages.planner import create_default_brain_service
 from packages.state import create_default_store
 from packages.tools import (
@@ -63,6 +65,21 @@ app.add_middleware(
 
 STORE = create_default_store()
 BRAIN = create_default_brain_service()
+
+
+def _runner_wall_clock_s() -> float:
+    raw = os.environ.get("MRI_AGENT_V4_RUN_TIMEOUT_S", "").strip()
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return 900.0
+    return value if value > 0 else 900.0
+
+
+# Background execution: POST /api/execute/* reserves the runner and returns at
+# once; GET /api/execute/status reports progress without ever waiting on the
+# store lock. STORE.execute_next() itself is untouched and still synchronous.
+RUNNER = ExecutionRunner(STORE, max_wall_clock_s=_runner_wall_clock_s())
 
 
 @app.get("/api/health")
@@ -279,24 +296,80 @@ def apply_latest_proposal() -> Dict[str, object]:
     return STORE.apply_latest_proposal()
 
 
+def _start_run(mode: str, *, max_steps: Optional[int] = None) -> Dict[str, object]:
+    try:
+        return RUNNER.start(mode, max_steps=max_steps)
+    except RunnerBusy as busy:
+        detail = dict(busy.status)
+        detail["started"] = False
+        detail["reason"] = "busy"
+        detail["message"] = str(busy)
+        raise HTTPException(status_code=409, detail=detail) from busy
+
+
+def _reject_if_running(action: str) -> None:
+    status = RUNNER.busy_payload()
+    if status.get("running"):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "ok": False,
+                "reason": "busy",
+                "message": f"cannot {action} while run {status.get('run_token')} is in flight",
+                **status,
+            },
+        )
+
+
 @app.post("/api/execute/next")
 def execute_next() -> Dict[str, object]:
-    return STORE.execute_next()
+    """Start one node on a background thread and return immediately.
+
+    The response reports which node is about to run; poll
+    ``GET /api/execute/status`` for progress and the final graph.
+    """
+    return _start_run("next")
 
 
 @app.post("/api/execute/until-done")
-def execute_until_done() -> Dict[str, object]:
-    return STORE.execute_until_done()
+def execute_until_done(max_steps: int = Query(default=20, ge=1, le=200)) -> Dict[str, object]:
+    """Start the run-to-end loop on a background thread and return immediately.
+
+    The runner drives the loop as repeated ``STORE.execute_next()`` calls, so
+    the store lock is released between nodes and ``/api/execute/status``
+    publishes genuine per-node progress. Stop conditions match
+    ``ExecutorStore.execute_until_done``: no runnable node, graph completed or
+    failed, or ``max_steps`` reached.
+    """
+    return _start_run("until_done", max_steps=max_steps)
+
+
+@app.get("/api/execute/status")
+def execute_status(include_graph: bool = Query(default=True)) -> Dict[str, object]:
+    """Runner state. Instant even while a node is executing.
+
+    While a run is in flight ``graph``/``session`` come from a snapshot taken
+    before the run started (or after the last completed step) — see
+    ``graph_source`` — because reading the live store would block on the lock
+    the executing node holds. When idle, the live snapshot is served.
+    """
+    return RUNNER.status(include_graph=include_graph)
 
 
 @app.post("/api/execute/rerun-from-node")
 def rerun_from_node(req: RerunFromNodeRequest) -> Dict[str, object]:
+    _reject_if_running("rerun from a node")
     return STORE.rerun_from_node(req.node_id, reason=req.reason, actor_id="operator")
 
 
 @app.post("/api/reset")
 def reset_demo() -> Dict[str, object]:
+    _reject_if_running("reset")
     session = STORE.reset()
+    # The finished run's result/steps/node_id refer to the graph we just threw
+    # away; leaving them queryable means /api/execute/status describes nodes
+    # that no longer exist.
+    RUNNER.forget_finished_run()
     return {
         "status": "reset",
         "session": session.model_dump(mode="json"),

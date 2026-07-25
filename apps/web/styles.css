@@ -1674,3 +1674,143 @@ body.resizing-row * {
   font-weight: 700;
   flex-shrink: 0;
 }
+
+/* ═══════════════════════════════════════════════════════
+   EXECUTION RUNNER — visible running state
+   The node the backend runner reports as executing gets an
+   amber, animated treatment plus a live elapsed counter, so
+   it is unmistakable against the green of "succeeded".
+═══════════════════════════════════════════════════════ */
+
+/* ── Executing node ── */
+.graph-node.is-executing {
+  border-color: var(--status-running);
+  background: linear-gradient(180deg, rgba(255,122,26,0.10) 0%, rgba(255,122,26,0.02) 100%);
+  animation: exec-pulse 1.15s ease-in-out infinite;
+  z-index: 5;
+}
+.graph-node.is-executing .node-title { color: #FFD2AC; }
+.graph-node.is-executing .node-bar {
+  height: 3px;
+  background: linear-gradient(90deg,
+      var(--status-running) 0%, #FFC46B 40%, var(--status-running) 80%);
+  background-size: 220% 100%;
+  animation: exec-sweep 1.1s linear infinite;
+}
+
+@keyframes exec-pulse {
+  0%, 100% { box-shadow: 0 0 0 1px rgba(255,122,26,0.45), 0 0 12px rgba(255,122,26,0.16); }
+  50%      { box-shadow: 0 0 0 3px rgba(255,122,26,0.55), 0 0 30px rgba(255,122,26,0.34); }
+}
+@keyframes exec-sweep {
+  from { background-position: 120% 0; }
+  to   { background-position: -120% 0; }
+}
+
+/* ── Live elapsed counter on the node ──
+   This replaces the status pill of the executing node, so it cannot overflow
+   the 172px card. Solid amber against the translucent green of "succeeded". */
+.spill.node-timer {
+  flex-shrink: 0;
+  background: var(--status-running);
+  color: #1A0A02;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 0 10px rgba(255,122,26,0.45);
+}
+.spill.node-timer::before { background: #1A0A02; animation: exec-blink 1.15s ease-in-out infinite; }
+@keyframes exec-blink { 0%,100% { opacity: 1; } 50% { opacity: 0.25; } }
+
+/* ── Pipeline strip dot for the executing node ── */
+.pip-dot.executing {
+  border-color: var(--status-running);
+  background: rgba(255,122,26,0.18);
+  animation: exec-dot 1.15s ease-in-out infinite;
+}
+.pip-dot.executing .pip-dot-inner { background: var(--status-running); }
+.pip-dot.executing .pip-label     { color: #FFC46B; }
+@keyframes exec-dot {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255,122,26,0.50); }
+  50%      { box-shadow: 0 0 0 5px rgba(255,122,26,0.00); }
+}
+
+/* ── Execution banner (graph panel header strip) ── */
+.exec-banner {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  background: linear-gradient(90deg, rgba(255,122,26,0.13) 0%, rgba(255,122,26,0.03) 100%);
+  border-bottom: 1px solid rgba(255,122,26,0.28);
+  animation: banner-in 0.25s ease;
+}
+.exec-banner.hidden { display: none; }
+.exec-banner.error {
+  background: linear-gradient(90deg, rgba(239,68,68,0.14) 0%, rgba(239,68,68,0.03) 100%);
+  border-bottom-color: rgba(239,68,68,0.35);
+}
+
+.exec-spinner {
+  width: 13px; height: 13px;
+  border: 1.5px solid rgba(255,122,26,0.28);
+  border-top-color: var(--status-running);
+  border-radius: 50%;
+  animation: spin 0.75s linear infinite;
+  flex-shrink: 0;
+}
+
+.exec-banner-icon {
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  background: rgba(239,68,68,0.18);
+  border: 1px solid rgba(239,68,68,0.45);
+  color: #FF8080;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 14px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.exec-banner-text  { flex: 1; min-width: 0; }
+.exec-banner-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #FFC46B;
+}
+.exec-banner.error .exec-banner-title { color: #FF9C9C; }
+.exec-banner-title strong { color: var(--text-strong); font-weight: 700; }
+
+.exec-elapsed {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-strong);
+  background: rgba(255,122,26,0.16);
+  border: 1px solid rgba(255,122,26,0.40);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+.exec-banner-sub {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.exec-banner-actions { display: flex; gap: 6px; flex-shrink: 0; }
+
+/* Controls are disabled while a run is in flight (the API rejects a second
+   start with 409, so the UI must not pretend otherwise). */
+.cbtn:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+  filter: grayscale(0.35);
+}

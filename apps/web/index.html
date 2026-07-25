@@ -113,6 +113,9 @@
           </div>
         </div>
         <div class="reflector-banner hidden" id="reflector-banner"></div>
+        <!-- Execution runner status. Driven only by GET /api/execute/status;
+             never shows a state the backend has not reported. -->
+        <div class="exec-banner hidden" id="exec-banner" role="status" aria-live="polite"></div>
         <div class="pipeline-strip" id="pipeline-strip"></div>
         <div id="graph-canvas" class="graph-canvas"></div>
       </section>
