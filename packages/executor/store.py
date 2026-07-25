@@ -384,6 +384,14 @@ _RECON_FORWARDED_ARG_KEYS: Tuple[str, ...] = (
     "nonspatial_order",
     "pixel_spacing",
     "undersample_factor",
+    # Readout-oversampling crop. Omitting these silently dropped them, so the
+    # reconstruction kept its uncropped ~800 mm field of view while the tool
+    # reported success -- the heart then occupied a small fraction of the frame
+    # and the segmentation under-covered the ventricle.
+    "readout_fov_mm",
+    "readout_oversampling",
+    "readout_crop_samples",
+    "readout_axis",
 )
 
 
