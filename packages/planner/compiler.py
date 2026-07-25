@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from packages.schemas import ActionEdge, ActionGraph, ActionNode, CaseState, GraphEvent
@@ -159,6 +160,16 @@ _TOOL_BLUEPRINTS: Dict[str, Dict[str, Any]] = {
         "checks": ["classification output present"],
         "owner": "executor",
     },
+    "reconstruct_grappa": {
+        "title": "Reconstruct k-space (GRAPPA)",
+        "action_type": "reconstruct_grappa",
+        "depends_on": [],
+        "kind": "tool",
+        "inputs": {"h5_path": "@case.input"},
+        "outputs": {"reconstructed_nifti": "", "mode": "", "output_shape": []},
+        "checks": ["reconstructed volume present"],
+        "owner": "executor",
+    },
     "segment_cardiac_cine": {
         "title": "Segment Cardiac Cine",
         "action_type": "segment_cardiac_cine",
@@ -201,7 +212,51 @@ def _normalize_tools(selected_tools: Sequence[str], tool_order: Sequence[str]) -
     return out
 
 
-def _select_tools(domain: str, requested_capabilities: Sequence[str]) -> Tuple[List[str], List[str], List[str]]:
+_INPUT_SCAN_LIMIT = 2000
+
+
+def _input_suffixes(case_state: Optional[Dict[str, Any]]) -> List[str]:
+    """Suffixes of the files a case actually points at.
+
+    Reads the real filesystem because the case input is the only honest signal for
+    "is this raw k-space or an image series?" -- ``available_modalities`` /
+    ``sequence_index`` are populated by ``identify_sequences``, which cannot run
+    before a k-space case has been reconstructed.  Anything unreadable yields no
+    suffixes, so an input rule can only ever *add* a tool on positive evidence.
+    """
+    raw = str((case_state or {}).get("input_root") or "").strip()
+    if not raw:
+        return []
+    try:
+        path = Path(raw).expanduser()
+        if path.is_file():
+            return [path.suffix.lower()]
+        if not path.is_dir():
+            return []
+        suffixes: List[str] = []
+        seen: set[str] = set()
+        # A case directory can be a DICOM series with thousands of files; only the
+        # distinct suffixes matter, and the scan is capped so compiling a graph can
+        # never turn into a directory walk of unbounded cost.
+        for index, item in enumerate(path.iterdir()):
+            if index >= _INPUT_SCAN_LIMIT:
+                break
+            if not item.is_file():
+                continue
+            suffix = item.suffix.lower()
+            if suffix not in seen:
+                seen.add(suffix)
+                suffixes.append(suffix)
+        return suffixes
+    except OSError:
+        return []
+
+
+def _select_tools(
+    domain: str,
+    requested_capabilities: Sequence[str],
+    case_state: Optional[Dict[str, Any]] = None,
+) -> Tuple[List[str], List[str], List[str]]:
     rulebook = get_domain_rulebook(domain)
     selected = list(rulebook.get("entry_tools") or [])
     applied_rules: List[str] = []
@@ -212,6 +267,18 @@ def _select_tools(domain: str, requested_capabilities: Sequence[str]) -> Tuple[L
         when_any = {str(item).strip() for item in rule.get("when_any") or [] if str(item).strip()}
         if requested.intersection(when_any):
             applied_rules.append(str(rule.get("rule_name") or ""))
+            selected.extend(str(tool) for tool in rule.get("select_tools") or [] if str(tool).strip())
+
+    input_rules = list(rulebook.get("input_rules") or [])
+    if input_rules:
+        suffixes = set(_input_suffixes(case_state))
+        for rule in input_rules:
+            wanted = {str(item).strip().lower() for item in rule.get("when_input_suffix_any") or [] if str(item).strip()}
+            if not wanted or not suffixes.intersection(wanted):
+                continue
+            rule_name = str(rule.get("rule_name") or "")
+            if rule_name and rule_name not in applied_rules:
+                applied_rules.append(rule_name)
             selected.extend(str(tool) for tool in rule.get("select_tools") or [] if str(tool).strip())
 
     tool_order = list(rulebook.get("tool_order") or [])
@@ -261,15 +328,21 @@ def _graph_node(tool_name: str, depends_on: Sequence[str]) -> ActionNode:
     )
 
 
-def _build_pipeline(domain: str, requested_capabilities: Sequence[str]) -> Tuple[List[str], List[str], List[str]]:
-    selected_tools, applied_rules, warnings = _select_tools(domain, requested_capabilities)
+def _build_pipeline(
+    domain: str,
+    requested_capabilities: Sequence[str],
+    case_state: Optional[Dict[str, Any]] = None,
+) -> Tuple[List[str], List[str], List[str]]:
+    selected_tools, applied_rules, warnings = _select_tools(domain, requested_capabilities, case_state)
     return selected_tools, applied_rules, warnings
 
 
 def compile_intent_spec(intent_spec: CompilerIntentSpec) -> CompilerResult:
     domain = str(intent_spec.domain or "prostate").strip().lower() or "prostate"
     rulebook = get_domain_rulebook(domain)
-    selected_tools, applied_rules, warnings = _build_pipeline(domain, intent_spec.requested_capabilities)
+    selected_tools, applied_rules, warnings = _build_pipeline(
+        domain, intent_spec.requested_capabilities, intent_spec.case_state
+    )
     compiler_input = build_compiler_input(intent_spec=intent_spec.to_dict(), selected_tools=selected_tools)
 
     nodes: List[ActionNode] = [
@@ -290,13 +363,16 @@ def compile_intent_spec(intent_spec: CompilerIntentSpec) -> CompilerResult:
         )
     ]
 
-    for tool_name in selected_tools:
-        if tool_name == "identify_sequences":
-            depends_on = []
-        else:
-            depends_on = _resolve_dependency(tool_name, selected_tools, rulebook)
-            if not depends_on and nodes:
-                depends_on = [nodes[-1].node_id]
+    for index, tool_name in enumerate(selected_tools):
+        # ``_resolve_dependency`` already returns [] for the first selected tool, so the
+        # head of the chain is never wired to the presentational ``intake_case`` node.
+        # ``identify_sequences`` is no longer special-cased to []: when a case starts
+        # from raw k-space the rulebook makes it depend on ``reconstruct_grappa``, and
+        # silently dropping that edge would let the executor inventory a case
+        # directory that has no image series in it yet.
+        depends_on = _resolve_dependency(tool_name, selected_tools, rulebook)
+        if not depends_on and index > 0 and nodes:
+            depends_on = [nodes[-1].node_id]
         nodes.append(_graph_node(tool_name, depends_on))
 
     edges: List[ActionEdge] = []

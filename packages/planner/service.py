@@ -151,6 +151,11 @@ def _domain_capability_map() -> Dict[str, List[str]]:
         tool_order = {str(tool_name).strip() for tool_name in rulebook.get("tool_order") or [] if str(tool_name).strip()}
         if "extract_roi_features" in tool_order:
             current.add("roi_features")
+        if "reconstruct_grappa" in tool_order:
+            # The engine registry lists reconstruct_grappa with no capabilities, so
+            # discover_capabilities() cannot surface it; the rulebook is the thing that
+            # actually knows the domain can reconstruct.
+            current.add("reconstruct")
         out[domain] = sorted(current)
     return out
 
@@ -199,6 +204,11 @@ def _explicit_requested_capabilities(message: str, *, available_capabilities: Se
         requested.append("full_pipeline")
     if any(token in lowered for token in ["register", "registration", "align", "alignment"]) and "register" in available:
         requested.append("register")
+    if any(
+        token in lowered
+        for token in ["k-space", "kspace", "k space", "grappa", "reconstruct", "reconstruction", "raw multi-coil", "raw multicoil", "hdf5", ".h5"]
+    ) and "reconstruct" in available:
+        requested.append("reconstruct")
     if any(token in lowered for token in ["segment", "segmentation", "mask"]) and "segment" in available:
         requested.append("segment")
     if any(token in lowered for token in ["classify", "classification", "grade", "diagnosis", "disease"]) and "classify" in available:

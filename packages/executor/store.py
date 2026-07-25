@@ -26,6 +26,7 @@ from packages.tools import resolve_demo_case, resolve_tool_runtime_profile, run_
 from packages.tools.compiler_metadata import DEFAULT_TOOL_CONTRACTS
 
 from .artifacts import ArtifactWriter, ArtifactWriteResult, make_node_artifact_dir
+from .narration import NODE_SUMMARY_KIND, build_node_summary
 
 
 def _utc_now():
@@ -210,6 +211,15 @@ _TOOL_EXECUTION_CONTRACTS: Dict[str, Dict[str, Any]] = {
         "stage": "classify",
         "required_output_paths": ("classification_path",),
     },
+    "reconstruct_grappa": {
+        # v3 ToolSpec.output_schema lists several keys but marks none required; the
+        # reconstruction NIfTI is the only one the rest of the cardiac chain consumes,
+        # and it is the only one the executor can stat.  ``zerofilled_nifti`` is
+        # deliberately NOT required: it exists only when the caller asked for
+        # retrospective undersampling.
+        "stage": "reconstruct",
+        "required_output_paths": ("reconstructed_nifti",),
+    },
     "segment_cardiac_cine": {
         # v3 requires only ``seg_path``; v4 additionally insists on the three class
         # masks, because ``classify_cardiac_cine_disease`` and the cardiac report
@@ -225,6 +235,12 @@ _TOOL_EXECUTION_CONTRACTS: Dict[str, Dict[str, Any]] = {
     "generate_qa_snapshot": {
         # Not a compiler blueprint tool: the executor calls it itself so the
         # NIfTI-only cardiac path still puts a viewable PNG in the artifact rail.
+        "stage": "qa",
+        "required_output_paths": ("output_png",),
+    },
+    "compare_nifti_slices": {
+        # Same deal as generate_qa_snapshot: called by the executor, not compiled.
+        # The reconstruction node uses it for the zero-filled vs GRAPPA before/after.
         "stage": "qa",
         "required_output_paths": ("output_png",),
     },
@@ -346,6 +362,37 @@ def _nifti_stem(path: Path) -> str:
 def _is_label_nifti(path: Path) -> bool:
     stem = _nifti_stem(path).lower()
     return any(stem.endswith(marker) or f"{marker}_" in stem for marker in _LABEL_FILENAME_MARKERS)
+
+
+_KSPACE_SUFFIXES: Tuple[str, ...] = (".h5", ".hdf5")
+
+# Optional sidecar next to a raw k-space file (or in the case root) carrying the
+# acquisition geometry the HDF5 itself does not: CMRxRecon's processed H5 files have
+# no pixel-spacing attribute, and reconstructing them as 1x1x1 mm would hand nnUNet a
+# volume whose physical heart is ~half its real size.  Only the keys listed in
+# ``_RECON_FORWARDED_ARG_KEYS`` are read, and every value that is used is echoed back
+# in ``node.outputs["recon_param_sources"]`` so nothing arrives at the tool unattributed.
+_RECON_PARAMS_FILENAME = "recon_params.json"
+
+_RECON_FORWARDED_ARG_KEYS: Tuple[str, ...] = (
+    "kspace_key",
+    "image_key",
+    "calib_key",
+    "acs_lines",
+    "kernel_size",
+    "coil_axis",
+    "nonspatial_order",
+    "pixel_spacing",
+    "undersample_factor",
+)
+
+
+def _kspace_files_in(directory: Path) -> List[Path]:
+    return sorted(
+        item
+        for item in directory.iterdir()
+        if item.is_file() and item.suffix.lower() in _KSPACE_SUFFIXES
+    )
 
 
 def _nifti_files_in(directory: Path) -> List[Path]:
@@ -870,6 +917,89 @@ class MockExecutorStore:
             "session": self.snapshot_session().model_dump(mode="json"),
         }
 
+    # ------------------------------------------------------------------
+    # Node narration
+    #
+    # After a node reaches a terminal state the chat panel used to say nothing
+    # -- it only ever restated the plan -- so this posts one assistant message
+    # per finished node describing what that node actually did, built from the
+    # node's real outputs and artifacts (see ``packages/executor/narration.py``).
+    # ------------------------------------------------------------------
+
+    def _node_summary_key(self, node: ActionNode, outcome: ExecutionOutcome) -> str:
+        """Stable identity for "this node, this attempt, this outcome".
+
+        Written into the chat message itself so the guard survives a reload:
+        ``chat_history`` is persisted, the store object is not.
+        """
+        attempt = str(node.current_attempt_id or "").strip()
+        if not attempt:
+            # ``blocked`` never opens an attempt; the blocking event id is unique.
+            attempt = str(outcome.event_ids[-1]) if outcome.event_ids else "no-attempt"
+        return f"{node.node_id}#{attempt}#{outcome.status}"
+
+    def _unsatisfied_dependencies(self, node: ActionNode) -> List[str]:
+        node_by_id = _node_map(self._session.graph)
+        out: List[str] = []
+        for dep in node.depends_on or []:
+            dep_node = node_by_id.get(str(dep))
+            if dep_node is None or str(dep_node.status) != "succeeded":
+                out.append(str(dep))
+        return out
+
+    def _node_artifacts(self, node: ActionNode) -> List[ArtifactRef]:
+        wanted = {str(item) for item in node.artifact_refs}
+        return [artifact for artifact in self._session.graph.artifacts if str(artifact.artifact_id) in wanted]
+
+    def _append_node_summary(self, node: ActionNode, outcome: ExecutionOutcome) -> Optional[Dict[str, str]]:
+        """Append one assistant chat message for a node that just finished.
+
+        Returns the message, or ``None`` when the node did not reach a terminal
+        state or a summary for this exact attempt is already in ``chat_history``
+        (so repeated status polls, replays and reloads cannot duplicate it).
+        """
+        status = str(outcome.status or node.status or "")
+        if status not in {"succeeded", "failed", "blocked"}:
+            return None
+        summary_key = self._node_summary_key(node, outcome)
+        for entry in self._session.chat_history:
+            if isinstance(entry, dict) and str(entry.get("summary_key") or "") == summary_key:
+                return None
+
+        summary = build_node_summary(
+            node=node,
+            artifacts=self._node_artifacts(node),
+            message=str(outcome.message or ""),
+            unsatisfied_deps=self._unsatisfied_dependencies(node) if status == "blocked" else (),
+            status=status,
+        )
+
+        message: Dict[str, str] = {
+            "role": "assistant",
+            "content": summary.text,
+            "kind": NODE_SUMMARY_KIND,
+            "node_id": str(node.node_id),
+            "node_status": status,
+            "attempt_id": str(node.current_attempt_id or ""),
+            "summary_key": summary_key,
+            "source": summary.source,
+        }
+        self._session.chat_history.append(message)
+        self._append_event(
+            actor_type="executor",
+            actor_id="cerebellum",
+            event_type="node_summary_posted",
+            target_id=str(node.node_id),
+            payload={
+                "node_id": str(node.node_id),
+                "status": status,
+                "attempt_id": str(node.current_attempt_id or ""),
+                "source": summary.source,
+                "content": summary.text,
+            },
+        )
+        return message
+
     def reset(self, *, purge_artifacts: bool = True) -> MockSession:
         if purge_artifacts and self._artifact_root.exists():
             shutil.rmtree(self._artifact_root, ignore_errors=True)
@@ -1015,6 +1145,24 @@ class MockExecutorStore:
             outcome = self._run_node(node)
         self._sync_graph_status()
         self._recompute_session_state()
+        # One chat summary per finished node, from that node's real outputs.
+        # Narration is commentary: it must never cost the caller a real result
+        # (this method's return value is what gets persisted), but a narration
+        # bug must not vanish either -- hence the event rather than a swallow.
+        try:
+            self._append_node_summary(node, outcome)
+        except Exception as exc:  # noqa: BLE001
+            self._append_event(
+                actor_type="executor",
+                actor_id="cerebellum",
+                event_type="node_summary_failed",
+                target_id=str(node.node_id),
+                payload={
+                    "node_id": str(node.node_id),
+                    "status": str(outcome.status),
+                    "error": f"{type(exc).__name__}: {exc}".strip(),
+                },
+            )
         return {
             "executed": True,
             "node_id": outcome.node_id,
@@ -1275,6 +1423,7 @@ class MockExecutorStore:
             "identify_sequences": self._exec_identify_sequences,
             "register_to_reference": self._exec_register_to_reference,
             "segment_prostate": self._exec_segment_prostate,
+            "reconstruct_grappa": self._exec_reconstruct_grappa,
             "segment_cardiac_cine": self._exec_segment_cardiac_cine,
             "classify_cardiac_cine_disease": self._exec_classify_cardiac_cine_disease,
             "generate_qa_snapshot": self._exec_generate_qa_snapshot,
@@ -1647,6 +1796,338 @@ class MockExecutorStore:
         )
 
     # ------------------------------------------------------------------
+    # Raw k-space reconstruction (cardiac chain entry point)
+    # ------------------------------------------------------------------
+
+    def _resolve_kspace_input(self, node: ActionNode) -> Path:
+        """Resolve the single HDF5 k-space file the reconstruction consumes.
+
+        The compiler emits ``inputs={"h5_path": "@case.input"}``; that placeholder is
+        never resolvable through the sequence index (identify_sequences has not run --
+        it *cannot* run until this node has produced an image), so it falls back to the
+        case root.  A directory is only accepted when exactly one HDF5 lives in it:
+        picking one of several silently would make the whole downstream chain describe
+        a file nobody chose.
+        """
+        inputs = dict(node.inputs or {})
+        raw = inputs.get("h5_path") or inputs.get("kspace_path") or inputs.get("h5") or ""
+        text = str(raw).strip()
+        if not text or text.startswith("@"):
+            text = str(self._session.case_state.input_root or "").strip()
+        if not text:
+            raise ContractValidationError(
+                "reconstruct_grappa could not resolve an HDF5 input: node inputs "
+                f"{inputs!r} and case input_root are both empty"
+            )
+        # ``os.path.abspath`` rather than ``Path.resolve()``: a case directory may hold
+        # symlinks into a read-only share that the operator does not want echoed back
+        # into the graph (and therefore onto the screen).  The path the operator
+        # registered is the path recorded; h5py follows the link either way.
+        candidate = Path(os.path.abspath(str(Path(text).expanduser())))
+        if candidate.is_file():
+            return candidate
+        if not candidate.is_dir():
+            raise ContractValidationError(f"reconstruct_grappa input does not exist: {candidate}")
+        kspace_files = _kspace_files_in(candidate)
+        if not kspace_files:
+            raise ContractValidationError(
+                f"reconstruct_grappa found no .h5/.hdf5 file under {candidate}"
+            )
+        if len(kspace_files) > 1:
+            joined = ", ".join(item.name for item in kspace_files)
+            raise ContractValidationError(
+                f"reconstruct_grappa input is ambiguous: {candidate} holds {len(kspace_files)} "
+                f"HDF5 files ({joined}); set node.inputs['h5_path'] to the intended file"
+            )
+        return kspace_files[0]
+
+    def _resolve_recon_params(self, node: ActionNode, h5_path: Path) -> Tuple[Dict[str, Any], Dict[str, str]]:
+        """Collect the optional reconstruction arguments, with provenance.
+
+        Precedence: explicit ``node.inputs`` beats a ``recon_params.json`` sidecar.
+        Nothing is defaulted here -- a key that neither source supplies is simply not
+        forwarded, and the engine tool's own documented default applies.
+        """
+        inputs = dict(node.inputs or {})
+        sidecar_payload: Dict[str, Any] = {}
+        sidecar_path = ""
+        candidates = [h5_path.parent / _RECON_PARAMS_FILENAME]
+        input_root = str(self._session.case_state.input_root or "").strip()
+        if input_root:
+            candidates.append(Path(input_root).expanduser() / _RECON_PARAMS_FILENAME)
+        for candidate in candidates:
+            try:
+                if not candidate.is_file():
+                    continue
+                loaded = json.loads(candidate.read_text(encoding="utf-8"))
+            except Exception as exc:
+                raise ContractValidationError(
+                    f"reconstruct_grappa could not read {candidate}: {exc}"
+                ) from exc
+            if isinstance(loaded, dict):
+                sidecar_payload = loaded
+                sidecar_path = str(candidate)
+                break
+
+        params: Dict[str, Any] = {}
+        sources: Dict[str, str] = {}
+        for key in _RECON_FORWARDED_ARG_KEYS:
+            if key in inputs:
+                value = inputs[key]
+                if value is not None and not (isinstance(value, str) and (not value.strip() or value.startswith("@"))):
+                    params[key] = value
+                    sources[key] = "node.inputs"
+                    continue
+            if key in sidecar_payload:
+                value = sidecar_payload[key]
+                if value is not None:
+                    params[key] = value
+                    sources[key] = sidecar_path
+        return params, sources
+
+    def _render_reconstruction_previews(
+        self,
+        *,
+        node: ActionNode,
+        node_dir: str,
+        data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Make the reconstruction visible: a centre-frame PNG, plus a before/after
+        when a zero-filled reference exists.
+
+        Auxiliary, exactly like the cardiac segmentation's snapshot: the NIfTI has
+        already been contract-validated by the time we get here, so a failed PNG does
+        not turn a real reconstruction into a failed node.  Failures are recorded as
+        ``ok=false`` tool records plus ``preview_errors`` on the node -- never hidden,
+        never replaced by a placeholder image.
+        """
+        out: Dict[str, Any] = {"artifacts": [], "snapshot_png": "", "comparison_png": "", "errors": [], "warnings": []}
+        reconstructed = str(data.get("reconstructed_nifti") or "").strip()
+        if not reconstructed:
+            out["errors"].append("reconstruct_grappa returned no reconstructed_nifti to preview")
+            return out
+
+        run_dir, artifacts_dir, case_state_path = self._ensure_runtime_workspace()
+        base_subdir = node_dir.split("/", 1)[1] if "/" in node_dir else node_dir
+        zerofilled = str(data.get("zerofilled_nifti") or "").strip()
+
+        jobs: List[Tuple[str, Dict[str, Any], str, Optional[str]]] = [
+            (
+                "generate_qa_snapshot",
+                {
+                    "input_nifti": reconstructed,
+                    "output_subdir": _artifact_rel_path(base_subdir, "qa"),
+                    "title": f"{Path(reconstructed).name} | reconstructed cine (centre frame / centre slice)",
+                },
+                "snapshot_png",
+                _qa_snapshot_profile_override(),
+            )
+        ]
+        if zerofilled:
+            jobs.append(
+                (
+                    "compare_nifti_slices",
+                    {
+                        "image_a": zerofilled,
+                        "image_b": reconstructed,
+                        "label_a": "Zero-filled (no GRAPPA)",
+                        "label_b": "GRAPPA reconstruction",
+                        "output_subdir": _artifact_rel_path(base_subdir, "qa"),
+                    },
+                    "comparison_png",
+                    None,
+                )
+            )
+
+        for tool_name, args, result_key, profile_override in jobs:
+            try:
+                kwargs: Dict[str, Any] = {
+                    "case_id": self._session.case_state.case_id,
+                    "run_id": self._session.graph.graph_id,
+                    "run_dir": run_dir,
+                    "artifacts_dir": artifacts_dir,
+                    "case_state_path": case_state_path,
+                }
+                if profile_override:
+                    kwargs["runtime_profile_override"] = profile_override
+                result = run_v3_tool(tool_name, args, **kwargs)
+                validation = self._validate_tool_result_contract(tool_name, result.data)
+            except Exception as exc:
+                message = str(exc).strip() or f"{tool_name} failed"
+                self._record_runtime_tool_result(
+                    tool_name=tool_name,
+                    ok=False,
+                    consumable=False,
+                    data={"error": message, **args},
+                    generated_artifacts=[],
+                    validation={"error": message},
+                    attempt_id=node.current_attempt_id,
+                    rerun_from=node.rerun_from,
+                    supersedes=node.supersedes,
+                )
+                out["errors"].append(f"{tool_name}: {message}")
+                continue
+            out["artifacts"].extend(
+                self._artifact_refs_from_generated(
+                    node=node,
+                    tool_name=tool_name,
+                    generated_artifacts=result.generated_artifacts,
+                )
+            )
+            self._record_runtime_tool_result(
+                tool_name=tool_name,
+                ok=True,
+                data=result.data,
+                generated_artifacts=result.generated_artifacts,
+                consumable=validation["consumable"],
+                validation=validation,
+                attempt_id=node.current_attempt_id,
+                rerun_from=node.rerun_from,
+                supersedes=node.supersedes,
+            )
+            out[result_key] = str(result.data.get("output_png") or "")
+            out["warnings"].extend(str(item) for item in result.warnings)
+        return out
+
+    def _exec_reconstruct_grappa(self, node: ActionNode) -> ExecutionOutcome:
+        graph = self._session.graph
+        run_dir, artifacts_dir, case_state_path = self._ensure_runtime_workspace()
+        node_dir = make_node_artifact_dir(graph_id=graph.graph_id, step_index=self._step_count + 1, node_id=node.node_id)
+        self._step_count += 1
+        h5_path = self._resolve_kspace_input(node)
+        params, param_sources = self._resolve_recon_params(node, h5_path)
+
+        # The reconstruction lands in its own directory holding exactly one NIfTI, so
+        # that the directory can become the case input for the image-domain nodes that
+        # follow.  The zero-filled reference is deliberately written elsewhere: dropped
+        # next to the reconstruction it would be enumerated as a second "cine" and
+        # pushed through nnUNet.
+        recon_dir = (self._artifact_root / node_dir / "recon").resolve()
+        zerofill_dir = (self._artifact_root / node_dir / "zerofill").resolve()
+        recon_dir.mkdir(parents=True, exist_ok=True)
+
+        args: Dict[str, Any] = {
+            "h5_path": str(h5_path),
+            "output_subdir": _artifact_rel_path(node_dir.split("/", 1)[1] if "/" in node_dir else node_dir, "recon"),
+            # 'cine' in the filename is what identify_sequences keys its CINE guess on.
+            "output_nifti": str(recon_dir / "reconstructed_cine.nii.gz"),
+        }
+        args.update(params)
+        if params.get("undersample_factor"):
+            zerofill_dir.mkdir(parents=True, exist_ok=True)
+            args["zerofilled_nifti"] = str(zerofill_dir / "zerofilled_cine.nii.gz")
+
+        result = run_v3_tool(
+            "reconstruct_grappa",
+            args,
+            case_id=self._session.case_state.case_id,
+            run_id=graph.graph_id,
+            run_dir=run_dir,
+            artifacts_dir=artifacts_dir,
+            case_state_path=case_state_path,
+        )
+        artifacts = self._artifact_refs_from_generated(
+            node=node,
+            tool_name="reconstruct_grappa",
+            generated_artifacts=result.generated_artifacts,
+        )
+        validation = self._validate_tool_result_contract("reconstruct_grappa", result.data)
+        self._record_runtime_tool_result(
+            tool_name="reconstruct_grappa",
+            ok=True,
+            data=result.data,
+            generated_artifacts=result.generated_artifacts,
+            consumable=validation["consumable"],
+            validation=validation,
+            attempt_id=node.current_attempt_id,
+            rerun_from=node.rerun_from,
+            supersedes=node.supersedes,
+        )
+
+        previews = self._render_reconstruction_previews(node=node, node_dir=node_dir, data=result.data)
+        artifacts.extend(previews["artifacts"])
+
+        reconstructed = str(result.data.get("reconstructed_nifti") or "")
+        previous_input_root = str(self._session.case_state.input_root or "")
+        # Everything downstream is image-domain.  Point the case at the directory the
+        # reconstruction wrote so identify_sequences inventories the reconstructed cine
+        # rather than the HDF5 it can say nothing about.  Both roots are recorded.
+        self._session.case_state.input_root = str(recon_dir)
+        runtime_state = self._load_runtime_case_state()
+        metadata = _ensure_dict(runtime_state.get("metadata"))
+        metadata.update(
+            {
+                "domain": self._session.case_state.domain,
+                "input_root": str(recon_dir),
+                "input_root_before_reconstruction": previous_input_root,
+                "source_kspace_h5": str(h5_path),
+            }
+        )
+        runtime_state["metadata"] = metadata
+        self._save_runtime_case_state(runtime_state)
+
+        undersample = _ensure_dict(result.data.get("undersample"))
+        warnings = list(result.warnings)
+        warnings.extend(str(item) for item in previews["warnings"])
+        warnings.extend(f"reconstruction preview unavailable: {item}" for item in previews["errors"])
+        node.outputs = {
+            "reconstructed_nifti": reconstructed,
+            "zerofilled_nifti": str(result.data.get("zerofilled_nifti") or ""),
+            "h5_path": str(h5_path),
+            "mode": str(result.data.get("mode") or ""),
+            "kspace_key": str(result.data.get("kspace_key") or result.data.get("source_key") or ""),
+            "kspace_shape": list(result.data.get("kspace_shape") or []),
+            "output_shape": list(result.data.get("output_shape") or []),
+            "pixel_spacing": list(result.data.get("pixel_spacing") or []),
+            "n_coils": result.data.get("n_coils"),
+            "frames_total": result.data.get("frames_total"),
+            "grappa_applied_frames": result.data.get("grappa_applied_frames"),
+            "grappa_skipped_frames": result.data.get("grappa_skipped_frames"),
+            "grappa_failed_frames": result.data.get("grappa_failed_frames"),
+            "acs_lines_used": result.data.get("acs_lines_used"),
+            "kernel_size": list(result.data.get("kernel_size") or []),
+            "nonspatial_order": list(result.data.get("nonspatial_order") or []),
+            "undersample": undersample,
+            "elapsed_seconds": result.data.get("elapsed_seconds"),
+            "recon_param_sources": dict(param_sources),
+            "case_input_root": str(recon_dir),
+            "previous_case_input_root": previous_input_root,
+            "qa_snapshot_path": previews["snapshot_png"],
+            "comparison_png_path": previews["comparison_png"],
+            "preview_errors": list(previews["errors"]),
+            "warnings": warnings,
+            "execution_mode": "v3_tool",
+            "runtime_profile": _runtime_profile_label("reconstruct_grappa"),
+        }
+
+        applied = result.data.get("grappa_applied_frames")
+        total = result.data.get("frames_total")
+        if isinstance(applied, int) and isinstance(total, int) and total:
+            kernel_note = f"GRAPPA kernel applied to {applied}/{total} frames"
+        else:
+            kernel_note = "GRAPPA kernel application count not reported by the tool"
+        note = f"Reconstructed {h5_path.name} via v3 reconstruct_grappa (mode={result.data.get('mode')}): {kernel_note}"
+        if undersample.get("applied"):
+            note = (
+                f"{note}; input k-space was retrospectively undersampled R={undersample.get('factor')} "
+                f"with {undersample.get('acs_lines')} ACS lines "
+                f"({undersample.get('ky_lines_kept')}/{undersample.get('ky_lines_total')} ky lines kept)"
+            )
+        if previews["errors"]:
+            note = f"{note} | preview unavailable: {'; '.join(previews['errors'])}"
+        node.notes = note
+
+        self._session.case_state.selected_artifacts = [artifact.artifact_id for artifact in artifacts[-3:]]
+        self._session.case_state.active_node_id = node.node_id
+        return ExecutionOutcome(
+            node.node_id,
+            "succeeded",
+            note,
+            [a.artifact_id for a in artifacts],
+            [],
+        )
+
+    # ------------------------------------------------------------------
     # Cardiac cine
     # ------------------------------------------------------------------
 
@@ -1666,8 +2147,12 @@ class MockExecutorStore:
         resolved = self._resolve_sequence_reference(raw, fallback_modality="CINE")
         text = str(resolved or "").strip()
         if not text or text.startswith("@"):
-            # Unresolved planner placeholder (``@case.input`` with no CINE in the
-            # sequence index) -- fall back to the case root.
+            # Unresolved planner placeholder and no CINE in the sequence index. When the
+            # case started from raw k-space the reconstruction node already produced the
+            # only cine there is, so use it rather than guessing from the case root --
+            # which for a k-space case still contains the HDF5 this tool cannot read.
+            text = self._latest_reconstructed_cine()
+        if not text or text.startswith("@"):
             text = str(self._session.case_state.input_root or "").strip()
         if not text:
             raise ContractValidationError(
@@ -1702,6 +2187,19 @@ class MockExecutorStore:
             "the directory cannot be passed wholesale without segmenting the labels, so set "
             "node.inputs['cine_path'] to the intended volume"
         )
+
+    def _latest_reconstructed_cine(self) -> str:
+        """Path of the cine a succeeded ``reconstruct_grappa`` node produced, or ""."""
+        for candidate in self._session.graph.nodes:
+            if _node_tool_identity(candidate) != "reconstruct_grappa":
+                continue
+            if str(candidate.status) != "succeeded":
+                continue
+            value = str(_ensure_dict(candidate.outputs).get("reconstructed_nifti") or "").strip()
+            if value:
+                return value
+        data = self._latest_runtime_tool_data("reconstruct", "reconstruct_grappa")
+        return str(data.get("reconstructed_nifti") or "").strip()
 
     def _cardiac_snapshot_anatomy(self, *, data: Dict[str, Any], cine_path: Path) -> Optional[Path]:
         """Pick the volume the segmentation is actually defined on.

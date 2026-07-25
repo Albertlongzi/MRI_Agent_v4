@@ -109,6 +109,16 @@ DEFAULT_TOOL_CONTRACTS: Dict[str, Dict[str, Any]] = {
         "produced_outputs": ["classification_path"],
         "notes": ["Consumes ROI features rather than raw model output."],
     },
+    "reconstruct_grappa": {
+        "domains": ["cardiac"],
+        "capabilities": ["reconstruct", "kspace_reconstruction"],
+        "required_inputs": ["h5_path"],
+        "produced_outputs": ["reconstructed_nifti"],
+        "notes": [
+            "Entry node for a case whose input is raw multi-coil k-space (HDF5) rather than images.",
+            "Everything image-domain in the cardiac chain depends on its reconstructed NIfTI.",
+        ],
+    },
     "segment_cardiac_cine": {
         "domains": ["cardiac"],
         "capabilities": ["segment"],
@@ -178,6 +188,7 @@ DOMAIN_RULEBOOK: Dict[str, Dict[str, Any]] = {
     "cardiac": {
         "entry_tools": ["identify_sequences"],
         "tool_order": [
+            "reconstruct_grappa",
             "identify_sequences",
             "segment_cardiac_cine",
             "classify_cardiac_cine_disease",
@@ -185,15 +196,30 @@ DOMAIN_RULEBOOK: Dict[str, Dict[str, Any]] = {
             "generate_report",
         ],
         "dependency_rules": [
-            {"rule_name": "cardiac-segment-after-intake", "target_tool": "segment_cardiac_cine", "depends_on": ["identify_sequences"], "reason": "cardiac segmentation follows sequence discovery"},
+            {"rule_name": "cardiac-identify-after-reconstruction", "target_tool": "identify_sequences", "depends_on": ["reconstruct_grappa"], "reason": "a raw k-space case has no image series to inventory until reconstruction has written one"},
+            {"rule_name": "cardiac-segment-after-intake", "target_tool": "segment_cardiac_cine", "depends_on": ["identify_sequences", "reconstruct_grappa"], "reason": "cardiac segmentation follows sequence discovery, and consumes the reconstructed cine when the case started from k-space"},
             {"rule_name": "cardiac-classify-after-seg", "target_tool": "classify_cardiac_cine_disease", "depends_on": ["segment_cardiac_cine"], "reason": "disease classification consumes segmentation output"},
             {"rule_name": "cardiac-report-after-evidence", "target_tool": "package_vlm_evidence", "depends_on": ["classify_cardiac_cine_disease", "segment_cardiac_cine"], "reason": "evidence packaging follows the richest available analysis step"},
             {"rule_name": "cardiac-report-final", "target_tool": "generate_report", "depends_on": ["package_vlm_evidence"], "reason": "report follows packaged evidence"},
         ],
         "capability_rules": [
+            {"rule_name": "cardiac-kspace-reconstruction", "when_any": ["reconstruct"], "select_tools": ["reconstruct_grappa"], "reason": "an explicit reconstruction request puts the k-space reconstruction node at the head of the chain"},
             {"rule_name": "cardiac-segmentation", "when_any": ["segment", "classify", "report", "full_pipeline"], "select_tools": ["segment_cardiac_cine"], "reason": "cardiac requests usually start with cine segmentation"},
             {"rule_name": "cardiac-classification", "when_any": ["classify", "full_pipeline"], "select_tools": ["classify_cardiac_cine_disease"], "reason": "disease classification follows segmentation"},
             {"rule_name": "cardiac-report-expansion", "when_any": ["report", "full_pipeline"], "select_tools": ["package_vlm_evidence", "generate_report"], "reason": "report requests require evidence packaging and final report synthesis"},
+        ],
+        # Rules keyed on what the case actually *is* rather than on what the user
+        # said.  A cardiac case whose input is an HDF5 k-space file cannot run a
+        # single image-domain tool until it has been reconstructed, no matter how
+        # the request was phrased -- so the reconstruction node is selected from
+        # the case input itself.
+        "input_rules": [
+            {
+                "rule_name": "cardiac-raw-kspace-entry",
+                "when_input_suffix_any": [".h5", ".hdf5"],
+                "select_tools": ["reconstruct_grappa"],
+                "reason": "case input is raw multi-coil k-space (HDF5); image-domain tools need a reconstruction first",
+            },
         ],
     },
 }
@@ -258,6 +284,7 @@ def build_compiler_input(
         "tool_contracts": contracts,
         "dependency_rules": [dict(rule) for rule in rulebook.get("dependency_rules") or []],
         "capability_expansion_rules": [dict(rule) for rule in rulebook.get("capability_rules") or []],
+        "input_expansion_rules": [dict(rule) for rule in rulebook.get("input_rules") or []],
         "tool_order": list(rulebook.get("tool_order") or []),
         "entry_tools": list(rulebook.get("entry_tools") or []),
     }

@@ -775,3 +775,403 @@ def test_cardiac_tools_are_no_longer_in_the_unhandled_set(tmp_path: Path) -> Non
         assert callable(getattr(store, f"_exec_{tool_name}", None))
         assert tool_name in store_module._TOOL_EXECUTION_CONTRACTS
         assert store_module._TOOL_REQUIRED_OUTPUT_PATHS[tool_name]
+
+
+# ---------------------------------------------------------------------------
+# reconstruct_grappa: the raw k-space entry point of the cardiac chain
+# ---------------------------------------------------------------------------
+
+
+def _recon_fixture(tmp_path: Path) -> dict:
+    """Files a real reconstruct_grappa run would leave behind."""
+    case_dir = tmp_path / "kspace_case"
+    h5 = _touch(case_dir / "cine_sax.h5", b"\x89HDF\r\n\x1a\n")
+
+    out = tmp_path / "recon_out"
+    recon = _touch(out / "recon" / "reconstructed_cine.nii.gz")
+    zerofilled = _touch(out / "zerofill" / "zerofilled_cine.nii.gz")
+    snapshot = _touch(out / "qa" / "qa_snapshot.png", b"\x89PNG\r\n\x1a\n")
+    comparison = _touch(out / "qa" / "before_vs_after.png", b"\x89PNG\r\n\x1a\n")
+    return {
+        "case_dir": case_dir,
+        "h5": h5,
+        "recon": recon,
+        "zerofilled": zerofilled,
+        "snapshot": snapshot,
+        "comparison": comparison,
+    }
+
+
+def _recon_data(fixture: dict, *, undersampled: bool = True) -> dict:
+    data = {
+        "reconstructed_nifti": str(fixture["recon"]),
+        "h5_path": str(fixture["h5"]),
+        "mode": "grappa",
+        "source_key": "kspace",
+        "kspace_key": "kspace",
+        "kspace_shape": [12, 9, 10, 410, 118],
+        "output_shape": [410, 118, 9, 12],
+        "pixel_spacing": [1.923077, 1.634615, 10.0],
+        "n_coils": 10,
+        "frames_total": 108,
+        "grappa_applied_frames": 108 if undersampled else 0,
+        "grappa_skipped_frames": 0 if undersampled else 108,
+        "grappa_failed_frames": 0,
+        "acs_lines_used": 24,
+        "kernel_size": [5, 5],
+        "nonspatial_axes": [0, 1],
+        "nonspatial_order": [1, 0],
+        "elapsed_seconds": 133.02,
+    }
+    if undersampled:
+        data["zerofilled_nifti"] = str(fixture["zerofilled"])
+        data["undersample"] = {
+            "applied": True,
+            "pattern": "uniform_ky_plus_acs",
+            "factor": 4,
+            "acs_lines": 24,
+            "ky_lines_total": 118,
+            "ky_lines_kept": 48,
+            "sampled_fraction": 0.40678,
+        }
+    else:
+        data["undersample"] = {"applied": False}
+    return data
+
+
+def _install_recon_fake(
+    monkeypatch,
+    fixture: dict,
+    calls: list,
+    *,
+    undersampled: bool = True,
+    preview_ok: bool = True,
+    recon_data_override: dict | None = None,
+):
+    def fake_run_v3_tool(tool_name, args, **kwargs):
+        calls.append((tool_name, dict(args), dict(kwargs)))
+        if tool_name == "reconstruct_grappa":
+            data = dict(recon_data_override) if recon_data_override is not None else _recon_data(
+                fixture, undersampled=undersampled
+            )
+            generated = [
+                {"path": str(fixture["recon"]), "kind": "nifti", "description": "GRAPPA reconstruction", "media_type": None},
+            ]
+            if undersampled and recon_data_override is None:
+                generated.append(
+                    {"path": str(fixture["zerofilled"]), "kind": "nifti", "description": "Zero-filled reference", "media_type": None}
+                )
+        elif tool_name == "generate_qa_snapshot":
+            if not preview_ok:
+                raise RuntimeError("matplotlib is unavailable in this runtime")
+            data = {"output_png": str(fixture["snapshot"]), "input_nifti": args.get("input_nifti", "")}
+            generated = [
+                {"path": str(fixture["snapshot"]), "kind": "png", "description": "Reconstruction snapshot", "media_type": "image/png"},
+            ]
+        elif tool_name == "compare_nifti_slices":
+            if not preview_ok:
+                raise RuntimeError("matplotlib is unavailable in this runtime")
+            data = {"output_png": str(fixture["comparison"]), "image_a": args.get("image_a", ""), "image_b": args.get("image_b", "")}
+            generated = [
+                {"path": str(fixture["comparison"]), "kind": "png", "description": "Zero-filled vs GRAPPA", "media_type": "image/png"},
+            ]
+        else:  # pragma: no cover - guards against an unexpected dispatch
+            raise AssertionError(f"unexpected tool dispatched: {tool_name}")
+        return V3ToolRunResult(
+            tool_name=tool_name,
+            data=data,
+            warnings=[],
+            source_artifacts=[],
+            generated_artifacts=generated,
+        )
+
+    monkeypatch.setattr(store_module, "run_v3_tool", fake_run_v3_tool)
+    return fake_run_v3_tool
+
+
+def _recon_node(store: MockExecutorStore, fixture: dict) -> ActionNode:
+    node = _replace_graph_with_single_tool_node(store, "reconstruct_grappa")
+    node.inputs = {"h5_path": "@case.input"}
+    store._session.case_state.input_root = str(fixture["case_dir"])
+    store._session.case_state.domain = "cardiac"
+    return node
+
+
+def test_reconstruct_grappa_node_reaches_run_v3_tool(tmp_path: Path, monkeypatch) -> None:
+    fixture = _recon_fixture(tmp_path)
+    store = MockExecutorStore(root_dir=tmp_path / "root")
+    node = _recon_node(store, fixture)
+    calls: list = []
+    _install_recon_fake(monkeypatch, fixture, calls)
+
+    outcome = store._run_node(node)
+
+    assert outcome.status == "succeeded", outcome.message
+    recon_calls = [call for call in calls if call[0] == "reconstruct_grappa"]
+    assert len(recon_calls) == 1
+    _, args, kwargs = recon_calls[0]
+    # ``@case.input`` resolved to the one HDF5 in the case directory, not the directory.
+    assert args["h5_path"] == str(fixture["h5"])
+    assert args["output_nifti"].endswith("/recon/reconstructed_cine.nii.gz")
+    assert kwargs["run_id"] == store._session.graph.graph_id
+
+    assert node.outputs["reconstructed_nifti"] == str(fixture["recon"])
+    assert node.outputs["grappa_applied_frames"] == 108
+    assert node.outputs["frames_total"] == 108
+    assert node.outputs["output_shape"] == [410, 118, 9, 12]
+    assert node.outputs["execution_mode"] == "v3_tool"
+    assert node.outputs["preview_errors"] == []
+
+    case_state_path = tmp_path / "root" / "runtime" / store._session.graph.graph_id / "case_state.json"
+    payload = json.loads(case_state_path.read_text(encoding="utf-8"))
+    record = payload["stage_outputs"]["reconstruct"]["reconstruct_grappa"][0]
+    assert record["ok"] is True
+    assert record["consumable"] is True
+    assert record["validation"]["resolved_output_paths"] == {"reconstructed_nifti": str(fixture["recon"])}
+    assert payload["metadata"]["source_kspace_h5"] == str(fixture["h5"])
+    assert payload["metadata"]["input_root_before_reconstruction"] == str(fixture["case_dir"])
+
+
+def test_reconstruct_grappa_repoints_the_case_at_the_reconstruction(tmp_path: Path, monkeypatch) -> None:
+    """Downstream nodes are image-domain: the case input must move to the recon dir."""
+    fixture = _recon_fixture(tmp_path)
+    store = MockExecutorStore(root_dir=tmp_path / "root")
+    node = _recon_node(store, fixture)
+    _install_recon_fake(monkeypatch, fixture, [])
+
+    assert store._run_node(node).status == "succeeded"
+
+    new_root = Path(store._session.case_state.input_root)
+    assert new_root.name == "recon"
+    assert node.outputs["previous_case_input_root"] == str(fixture["case_dir"])
+    assert node.outputs["case_input_root"] == str(new_root)
+
+
+def test_reconstruct_grappa_missing_output_marks_node_failed(tmp_path: Path, monkeypatch) -> None:
+    fixture = _recon_fixture(tmp_path)
+    fixture["recon"].unlink()
+    store = MockExecutorStore(root_dir=tmp_path / "root")
+    node = _recon_node(store, fixture)
+    calls: list = []
+    _install_recon_fake(monkeypatch, fixture, calls)
+
+    outcome = store._run_node(node)
+
+    assert outcome.status == "failed"
+    assert "reconstruct_grappa missing required output paths" in outcome.message
+    assert "reconstructed_nifti" in outcome.message
+    # No preview is attempted for a reconstruction that failed its contract, and the
+    # case input is not repointed at a directory with nothing in it.
+    assert [call for call in calls if call[0] in {"generate_qa_snapshot", "compare_nifti_slices"}] == []
+    assert store._session.case_state.input_root == str(fixture["case_dir"])
+
+
+def test_reconstruct_grappa_emits_snapshot_and_before_after_pngs(tmp_path: Path, monkeypatch) -> None:
+    """The UI has no NIfTI viewer: the reconstruction must produce viewable PNGs."""
+    fixture = _recon_fixture(tmp_path)
+    store = MockExecutorStore(root_dir=tmp_path / "root")
+    node = _recon_node(store, fixture)
+    calls: list = []
+    _install_recon_fake(monkeypatch, fixture, calls)
+
+    assert store._run_node(node).status == "succeeded"
+
+    snapshot_calls = [call for call in calls if call[0] == "generate_qa_snapshot"]
+    compare_calls = [call for call in calls if call[0] == "compare_nifti_slices"]
+    assert len(snapshot_calls) == 1
+    assert snapshot_calls[0][1]["input_nifti"] == str(fixture["recon"])
+    assert len(compare_calls) == 1
+    # Before = zero-filled, after = GRAPPA. Getting these the wrong way round would
+    # advertise the aliased image as the result.
+    assert compare_calls[0][1]["image_a"] == str(fixture["zerofilled"])
+    assert compare_calls[0][1]["image_b"] == str(fixture["recon"])
+
+    pngs = [a for a in store._session.graph.artifacts if a.kind == "png"]
+    assert sorted(Path(a.uri).name for a in pngs) == ["before_vs_after.png", "qa_snapshot.png"]
+    assert all(a.role == "preview" for a in pngs)
+    assert node.outputs["qa_snapshot_path"] == str(fixture["snapshot"])
+    assert node.outputs["comparison_png_path"] == str(fixture["comparison"])
+
+
+def test_reconstruct_grappa_without_undersampling_skips_the_before_after(tmp_path: Path, monkeypatch) -> None:
+    """No zero-filled reference exists, so there is nothing honest to compare against."""
+    fixture = _recon_fixture(tmp_path)
+    store = MockExecutorStore(root_dir=tmp_path / "root")
+    node = _recon_node(store, fixture)
+    calls: list = []
+    _install_recon_fake(monkeypatch, fixture, calls, undersampled=False)
+
+    assert store._run_node(node).status == "succeeded"
+
+    assert [call for call in calls if call[0] == "compare_nifti_slices"] == []
+    assert node.outputs["comparison_png_path"] == ""
+    # And the node says out loud that no GRAPPA kernel was applied.
+    assert node.outputs["grappa_applied_frames"] == 0
+    assert "GRAPPA kernel applied to 0/108 frames" in str(node.notes)
+
+
+def test_reconstruct_grappa_preview_failure_does_not_fake_a_png(tmp_path: Path, monkeypatch) -> None:
+    fixture = _recon_fixture(tmp_path)
+    store = MockExecutorStore(root_dir=tmp_path / "root")
+    node = _recon_node(store, fixture)
+    calls: list = []
+    _install_recon_fake(monkeypatch, fixture, calls, preview_ok=False)
+
+    outcome = store._run_node(node)
+
+    # The reconstruction itself passed its contract, so the node stands.
+    assert outcome.status == "succeeded"
+    assert node.outputs["qa_snapshot_path"] == ""
+    assert node.outputs["comparison_png_path"] == ""
+    assert len(node.outputs["preview_errors"]) == 2
+    assert all("matplotlib is unavailable" in item for item in node.outputs["preview_errors"])
+    assert "preview unavailable" in str(node.notes)
+    assert [a for a in store._session.graph.artifacts if a.kind == "png"] == []
+
+    case_state_path = tmp_path / "root" / "runtime" / store._session.graph.graph_id / "case_state.json"
+    payload = json.loads(case_state_path.read_text(encoding="utf-8"))
+    for tool_name in ("generate_qa_snapshot", "compare_nifti_slices"):
+        record = payload["stage_outputs"]["qa"][tool_name][0]
+        assert record["ok"] is False
+        assert "matplotlib is unavailable" in record["data"]["error"]
+
+
+def test_reconstruct_grappa_forwards_sidecar_acquisition_params(tmp_path: Path, monkeypatch) -> None:
+    """CMRxRecon H5 files carry no pixel spacing; a sidecar supplies it, attributed."""
+    fixture = _recon_fixture(tmp_path)
+    sidecar = fixture["case_dir"] / "recon_params.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "pixel_spacing": [1.923077, 1.634615, 10.0],
+                "coil_axis": 2,
+                "nonspatial_order": [1, 0],
+                "undersample_factor": 4,
+                "acs_lines": 24,
+                "provenance": "vendor cine_sax_info.csv",
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = MockExecutorStore(root_dir=tmp_path / "root")
+    node = _recon_node(store, fixture)
+    node.inputs["acs_lines"] = 32  # explicit node input must win over the sidecar
+    calls: list = []
+    _install_recon_fake(monkeypatch, fixture, calls)
+
+    assert store._run_node(node).status == "succeeded"
+
+    _, args, _ = next(call for call in calls if call[0] == "reconstruct_grappa")
+    assert args["pixel_spacing"] == [1.923077, 1.634615, 10.0]
+    assert args["coil_axis"] == 2
+    assert args["nonspatial_order"] == [1, 0]
+    assert args["undersample_factor"] == 4
+    assert args["acs_lines"] == 32
+    assert args["zerofilled_nifti"].endswith("/zerofill/zerofilled_cine.nii.gz")
+    # "provenance" is not a forwarded key -- unknown sidecar keys never reach the tool.
+    assert "provenance" not in args
+
+    assert node.outputs["recon_param_sources"]["acs_lines"] == "node.inputs"
+    assert node.outputs["recon_param_sources"]["pixel_spacing"] == str(sidecar)
+
+
+def test_reconstruct_grappa_rejects_ambiguous_kspace_directory(tmp_path: Path, monkeypatch) -> None:
+    fixture = _recon_fixture(tmp_path)
+    _touch(fixture["case_dir"] / "cine_lax_4ch.h5", b"\x89HDF\r\n\x1a\n")
+    store = MockExecutorStore(root_dir=tmp_path / "root")
+    node = _recon_node(store, fixture)
+
+    def boom(*args, **kwargs):
+        raise AssertionError("run_v3_tool must not be reached with an ambiguous input")
+
+    monkeypatch.setattr(store_module, "run_v3_tool", boom)
+
+    outcome = store._run_node(node)
+
+    assert outcome.status == "failed"
+    assert "ambiguous" in outcome.message
+    assert "cine_lax_4ch.h5" in outcome.message
+
+
+def test_reconstruct_grappa_without_any_kspace_file_fails_loudly(tmp_path: Path, monkeypatch) -> None:
+    fixture = _recon_fixture(tmp_path)
+    fixture["h5"].unlink()
+    store = MockExecutorStore(root_dir=tmp_path / "root")
+    node = _recon_node(store, fixture)
+
+    def boom(*args, **kwargs):
+        raise AssertionError("run_v3_tool must not be reached without an input")
+
+    monkeypatch.setattr(store_module, "run_v3_tool", boom)
+
+    outcome = store._run_node(node)
+
+    assert outcome.status == "failed"
+    assert "found no .h5/.hdf5 file" in outcome.message
+
+
+def test_segment_cardiac_cine_consumes_the_upstream_reconstruction(tmp_path: Path, monkeypatch) -> None:
+    """With no CINE in the sequence index, segmentation must use the reconstruction."""
+    recon_fixture = _recon_fixture(tmp_path)
+    seg_fixture = _cardiac_seg_fixture(tmp_path)
+    store = MockExecutorStore(root_dir=tmp_path / "root")
+
+    recon_node = _recon_node(store, recon_fixture)
+    seg_node = ActionNode(
+        node_id="segment_cardiac_cine",
+        kind="tool",
+        title="Segment Cardiac Cine",
+        action_type="segment_cardiac_cine",
+        tool_name="segment_cardiac_cine",
+        status="planned",
+        depends_on=["reconstruct_grappa"],
+        inputs={"cine_ref": "@case.input"},
+        owner="executor",
+    )
+    store._session.graph.nodes = [recon_node, seg_node]
+
+    recon_calls: list = []
+    _install_recon_fake(monkeypatch, recon_fixture, recon_calls)
+    assert store._run_node(recon_node).status == "succeeded"
+
+    seg_calls: list = []
+    _install_cardiac_fake(monkeypatch, seg_fixture, seg_calls)
+    assert store._run_node(seg_node).status == "succeeded"
+
+    _, args, _ = next(call for call in seg_calls if call[0] == "segment_cardiac_cine")
+    assert args["cine_path"] == str(recon_fixture["recon"])
+
+
+def test_reconstruct_grappa_is_wired_to_a_real_handler(tmp_path: Path) -> None:
+    store = MockExecutorStore(root_dir=tmp_path)
+    assert "reconstruct_grappa" not in UNHANDLED_TOOLS
+    assert callable(getattr(store, "_exec_reconstruct_grappa", None))
+    assert store_module._TOOL_EXECUTION_CONTRACTS["reconstruct_grappa"]["stage"] == "reconstruct"
+    assert store_module._TOOL_REQUIRED_OUTPUT_PATHS["reconstruct_grappa"] == ("reconstructed_nifti",)
+    assert store_module._TOOL_REQUIRED_OUTPUT_PATHS["compare_nifti_slices"] == ("output_png",)
+
+
+def test_reconstruct_grappa_keeps_the_registered_path_for_a_symlinked_case(tmp_path: Path, monkeypatch) -> None:
+    """A case dir may symlink into a read-only share whose path must not leak.
+
+    Resolving the symlink would put the share's absolute path into node.outputs,
+    the runtime case_state and therefore the UI.  The path the operator registered
+    is the path recorded.
+    """
+    fixture = _recon_fixture(tmp_path)
+    share = tmp_path / "read_only_share"
+    real_h5 = _touch(share / "Center006_P038_cine_sax.h5", b"\x89HDF\r\n\x1a\n")
+    fixture["h5"].unlink()
+    (fixture["case_dir"] / "cine_sax.h5").symlink_to(real_h5)
+
+    store = MockExecutorStore(root_dir=tmp_path / "root")
+    node = _recon_node(store, fixture)
+    calls: list = []
+    _install_recon_fake(monkeypatch, fixture, calls)
+
+    assert store._run_node(node).status == "succeeded"
+
+    _, args, _ = next(call for call in calls if call[0] == "reconstruct_grappa")
+    assert args["h5_path"] == str(fixture["case_dir"] / "cine_sax.h5")
+    assert str(share) not in args["h5_path"]
+    assert str(share) not in node.outputs["h5_path"]

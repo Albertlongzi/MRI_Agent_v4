@@ -104,6 +104,20 @@
         "Provision with: conda env create -f envs/cardiac.yml, then pip install -e external/nnunet_phys_seg."
       ]
     },
+    "recon-cpu": {
+      "description": "CPU runtime for k-space reconstruction (pygrappa/h5py; mirrors the BCER 'recon' tier).",
+      "launcher": "subprocess",
+      "conda_env": "bcer-recon",
+      "conda_executable": "/apps/anaconda3/2022.05/bin/conda",
+      "timeout_seconds": 1800,
+      "gpu": false,
+      "notes": [
+        "Mirrors the 'recon' tier in BCER_open configs/tool_runtime.yml.",
+        "Provision with: conda env create -f envs/recon.yml",
+        "conda_env is mandatory: the control-plane virtualenv has neither numpy nor h5py nor pygrappa.",
+        "timeout_seconds is generous on purpose: GRAPPA runs frame-by-frame, so a multi-slice cine is minutes, not seconds."
+      ]
+    },
     "radiomics-cpu": {
       "description": "CPU runtime for pyradiomics feature extraction (mirrors the BCER 'radiomics' tier).",
       "launcher": "subprocess",
@@ -131,7 +145,8 @@
     "classify_brain_glioma_grade": "legacy-qwen-vllm",
     "segment_cardiac_cine": "cardiac-nnunet-gpu",
     "classify_cardiac_cine_disease": "legacy-qwen-vllm",
-    "reconstruct_grappa": "legacy-qwen-vllm",
+    "reconstruct_grappa": "recon-cpu",
+    "compare_nifti_slices": "legacy-qwen-vllm",
     "rag_search": "control-plane",
     "sandbox_exec": "control-plane"
   }
