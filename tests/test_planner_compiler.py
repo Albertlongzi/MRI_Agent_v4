@@ -164,8 +164,14 @@ def test_missing_case_input_never_invents_a_reconstruction_node(tmp_path) -> Non
     assert "cardiac-raw-kspace-entry" not in result.applied_rules
 
 
-def test_reconstruct_capability_selects_reconstruction_without_a_kspace_input(tmp_path) -> None:
-    """An explicit capability request is honoured on its own."""
+def test_reconstruct_capability_is_ignored_without_a_kspace_input(tmp_path) -> None:
+    """Asking to "reconstruct" an image-domain case must not add a dead node.
+
+    The capability rule used to fire on the wording alone, so a request
+    mentioning reconstruction on a NIfTI case compiled a reconstruct_grappa
+    node that could only ever fail with "found no .h5/.hdf5 file". It is now
+    additionally gated on the case input.
+    """
     case_dir = tmp_path / "nifti_case"
     case_dir.mkdir()
     (case_dir / "patient061_cine_4d.nii.gz").write_bytes(b"\x1f\x8b nifti-ish")
@@ -173,8 +179,23 @@ def test_reconstruct_capability_selects_reconstruction_without_a_kspace_input(tm
     result = compile_intent_spec(_cardiac_intent(case_dir, ["full_pipeline", "reconstruct"]))
     tool_names = [node.tool_name for node in result.graph.nodes if node.tool_name]
 
+    assert "reconstruct_grappa" not in tool_names
+    assert "cardiac-kspace-reconstruction" not in result.applied_rules
+    assert tool_names[0] == "identify_sequences"
+    # the skip is reported rather than silent
+    assert any("cardiac-kspace-reconstruction" in w for w in result.warnings)
+
+
+def test_reconstruct_capability_is_honoured_when_the_input_is_kspace(tmp_path) -> None:
+    """The same request on a real k-space case still leads with reconstruction."""
+    case_dir = tmp_path / "kspace_case"
+    case_dir.mkdir()
+    (case_dir / "Center006_P038_cine_sax.h5").write_bytes(b"\x89HDF\r\n\x1a\n")
+
+    result = compile_intent_spec(_cardiac_intent(case_dir, ["full_pipeline", "reconstruct"]))
+    tool_names = [node.tool_name for node in result.graph.nodes if node.tool_name]
+
     assert tool_names[0] == "reconstruct_grappa"
-    assert "cardiac-kspace-reconstruction" in result.applied_rules
 
 
 def test_reconstruct_grappa_has_compiler_metadata() -> None:

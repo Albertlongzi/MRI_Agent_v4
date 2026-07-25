@@ -263,15 +263,37 @@ def _select_tools(
     warnings: List[str] = []
     requested = {str(cap).strip() for cap in requested_capabilities if str(cap).strip()}
 
+    # Computed once: some capability rules are additionally gated on what the
+    # case input actually is, so that asking for something the input cannot
+    # support does not put an unrunnable node in the graph.
+    input_suffixes = set(_input_suffixes(case_state))
+
     for rule in rulebook.get("capability_rules") or []:
         when_any = {str(item).strip() for item in rule.get("when_any") or [] if str(item).strip()}
-        if requested.intersection(when_any):
-            applied_rules.append(str(rule.get("rule_name") or ""))
-            selected.extend(str(tool) for tool in rule.get("select_tools") or [] if str(tool).strip())
+        if not requested.intersection(when_any):
+            continue
+        # A rule may declare the input suffixes it needs. Requesting
+        # "reconstruct" on an image-domain case used to select the k-space
+        # reconstruction node purely from the wording, producing a node that
+        # could only ever fail with "found no .h5/.hdf5 file".
+        required_suffixes = {
+            str(item).strip().lower()
+            for item in rule.get("require_input_suffix_any") or []
+            if str(item).strip()
+        }
+        if required_suffixes and not input_suffixes.intersection(required_suffixes):
+            warnings.append(
+                f"{rule.get('rule_name') or 'rule'}: skipped, the requested capability needs a "
+                f"{'/'.join(sorted(required_suffixes))} input but the case provides "
+                f"{'/'.join(sorted(input_suffixes)) or 'none'}"
+            )
+            continue
+        applied_rules.append(str(rule.get("rule_name") or ""))
+        selected.extend(str(tool) for tool in rule.get("select_tools") or [] if str(tool).strip())
 
     input_rules = list(rulebook.get("input_rules") or [])
     if input_rules:
-        suffixes = set(_input_suffixes(case_state))
+        suffixes = input_suffixes
         for rule in input_rules:
             wanted = {str(item).strip().lower() for item in rule.get("when_input_suffix_any") or [] if str(item).strip()}
             if not wanted or not suffixes.intersection(wanted):

@@ -203,7 +203,7 @@ DOMAIN_RULEBOOK: Dict[str, Dict[str, Any]] = {
             {"rule_name": "cardiac-report-final", "target_tool": "generate_report", "depends_on": ["package_vlm_evidence"], "reason": "report follows packaged evidence"},
         ],
         "capability_rules": [
-            {"rule_name": "cardiac-kspace-reconstruction", "when_any": ["reconstruct"], "select_tools": ["reconstruct_grappa"], "reason": "an explicit reconstruction request puts the k-space reconstruction node at the head of the chain"},
+            {"rule_name": "cardiac-kspace-reconstruction", "when_any": ["reconstruct"], "require_input_suffix_any": [".h5", ".hdf5"], "select_tools": ["reconstruct_grappa"], "reason": "an explicit reconstruction request puts the k-space reconstruction node at the head of the chain, but only when the case input really is raw k-space -- otherwise the node could only fail"},
             {"rule_name": "cardiac-segmentation", "when_any": ["segment", "classify", "report", "full_pipeline"], "select_tools": ["segment_cardiac_cine"], "reason": "cardiac requests usually start with cine segmentation"},
             {"rule_name": "cardiac-classification", "when_any": ["classify", "full_pipeline"], "select_tools": ["classify_cardiac_cine_disease"], "reason": "disease classification follows segmentation"},
             {"rule_name": "cardiac-report-expansion", "when_any": ["report", "full_pipeline"], "select_tools": ["package_vlm_evidence", "generate_report"], "reason": "report requests require evidence packaging and final report synthesis"},
