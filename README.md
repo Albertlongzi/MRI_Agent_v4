@@ -33,6 +33,27 @@ more interactive workstation model:
 - human-in-the-loop review and patching
 - optional future supervisor-led specialist subagents
 
+## Demo
+
+A cardiac case run end to end from a typed clinical request: **raw multi-coil
+k-space → GRAPPA reconstruction → identify → cine segmentation → disease
+classification → evidence → report**. Every node is a real tool call dispatched
+into the BCER engine. The amber node is executing, with its live elapsed time;
+execution is asynchronous, so the graph stays interactive while a node runs.
+
+![the workstation executing a cardiac pipeline](docs/demo/pipeline.gif)
+
+![RV / myocardium / LV segmentation shown in the viewer](docs/demo/segmentation.png)
+
+That run measured **LV EDV 132.7 mL, ESV 42.4 mL, ejection fraction 68.0 %**
+across 10 of 14 slices on a CMRxRecon short-axis acquisition, with every
+geometry value taken from the vendor sidecar rather than assumed. After each
+node the chat posts a summary built from that node's real outputs.
+
+Read [Executor Coverage](#executor-coverage-read-this-before-judging-the-demo)
+before drawing conclusions: real handlers exist for 8 of the 12 tools the
+planner can compile, and the rest fail loudly rather than pretending to succeed.
+
 ## Status
 
 This folder now contains:
@@ -105,33 +126,42 @@ Implemented today:
 
 ## Executor Coverage (read this before judging the demo)
 
-The planner and compiler can emit graphs for **11** tools, but the executor has
-real handlers for only **5** of them — all on the prostate path:
+The planner and compiler can emit graphs for **12** tools. The executor has real
+handlers for **8** of them:
 
 | Tool | Executor handler |
 | --- | --- |
 | `identify_sequences` | yes — real BCER call |
+| `reconstruct_grappa` | yes — real BCER call |
 | `register_to_reference` | yes — real BCER call |
 | `segment_prostate` | yes — real BCER call |
+| `segment_cardiac_cine` | yes — real BCER call |
+| `classify_cardiac_cine_disease` | yes — real BCER call |
 | `package_vlm_evidence` | yes — real BCER call |
 | `generate_report` | yes — real BCER call, `llm_mode=disabled` |
-| `detect_lesion_candidates` | **no** |
-| `extract_roi_features` | **no** |
 | `brats_mri_segmentation` | **no** |
 | `classify_brain_glioma_grade` | **no** |
-| `segment_cardiac_cine` | **no** |
-| `classify_cardiac_cine_disease` | **no** |
+| `detect_lesion_candidates` | **no** |
+| `extract_roi_features` | **no** |
 
 Consequences, stated plainly:
 
-- **Brain and cardiac graphs do not run.** The planner will happily compile them,
-  and then the executor raises `MissingExecutorHandlerError` on the first tool
-  node. That is deliberate: there is no mock mode and no placeholder result, so a
-  tool that cannot really run fails instead of reporting fabricated success.
-- The prostate workflow is the only end-to-end path, and even it requires a
-  working `BCER_ROOT` plus the demo case data from the BCER repo.
+- **Cardiac and prostate run end to end.** Cardiac additionally runs from raw
+  multi-coil k-space, since `reconstruct_grappa` leads the chain when the case
+  input is HDF5.
+- **Brain graphs do not run.** `brats_mri_segmentation` and
+  `classify_brain_glioma_grade` have no handler, so the planner compiles a brain
+  graph and the executor then raises `MissingExecutorHandlerError` on the first
+  unimplemented node. That is deliberate: there is no mock mode and no
+  placeholder result, so a tool that cannot really run fails loudly instead of
+  reporting fabricated success. The same applies to the prostate lesion and
+  radiomics steps.
+- Any of this requires a working `BCER_ROOT` plus case data; the engine repo
+  ships the demo cases and the asset download script.
 - `generate_report` runs with `llm_mode=disabled`, i.e. deterministic templating,
-  not model-written prose.
+  not model-written prose. Its report template is still prostate-shaped: a
+  cardiac `report.json` carries unused PI-RADS-style fields even though the
+  measurements in it are correct.
 
 ## Run The Demo
 
